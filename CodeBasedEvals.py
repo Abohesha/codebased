@@ -3072,14 +3072,8 @@ def calculate_total_guardrail(session, department_name, departments_config, targ
         ) all_guardrails
         """
 
-        result_df = session.sql(query).to_pandas()
-
-        guardrail_count = 0
-        if not result_df.empty and 'TOTAL_GUARDRAIL_CONVS' in result_df.columns:
-            guardrail_count = int(result_df['TOTAL_GUARDRAIL_CONVS'].iloc[0])
-
-        # For multiple_contract_detector: also count frustration transfers from raw chat table
-        # (flag: Transfer due to frustration via the transfer_tool)
+        # For multiple_contract_detector: extend the UNION to include frustration transfers
+        # directly in the SQL so duplicates are eliminated automatically
         if department_name == 'multiple_contract_detector':
             dept_config = departments_config.get(department_name, {})
             table_name = dept_config.get('table_name', 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS')
@@ -3087,23 +3081,43 @@ def calculate_total_guardrail(session, department_name, departments_config, targ
             filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
             skills_list = "', '".join(bot_skills)
 
-            frustration_query = f"""
-            SELECT DISTINCT CONVERSATION_ID
-            FROM {table_name}
-            WHERE DATE(UPDATED_AT) = '{filter_date}'
-              AND UPPER(TEXT) LIKE '%TRANSFER DUE TO FRUSTRATION%'
-              AND UPPER(TARGET_SKILL_PER_MESSAGE) IN ('{skills_list.upper()}')
+            query = f"""
+            SELECT COUNT(DISTINCT conversation_id) as TOTAL_GUARDRAIL_CONVS
+            FROM (
+                SELECT DISTINCT CONVERSATION_ID
+                FROM GUARDRAIL_STOPPED_TOOLS
+                WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+
+                UNION
+
+                SELECT DISTINCT CONVERSATION_ID
+                FROM GUARDRAIL_MISSED_TOOLS
+                WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+
+                UNION
+
+                SELECT DISTINCT CONVERSATION_ID
+                FROM GUARDRAIL_FALSE_PROMISE_NO_TOOL
+                WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+
+                UNION
+
+                SELECT DISTINCT CONVERSATION_ID
+                FROM {table_name}
+                WHERE DATE(UPDATED_AT) = '{filter_date}'
+                  AND UPPER(TEXT) LIKE '%TRANSFER DUE TO FRUSTRATION%'
+                  AND UPPER(TARGET_SKILL_PER_MESSAGE) IN ('{skills_list.upper()}')
+            ) all_guardrails
             """
 
-            try:
-                frustration_df = session.sql(frustration_query).to_pandas()
-                frustration_ids = set(frustration_df['CONVERSATION_ID'].values) if not frustration_df.empty else set()
-                frustration_count = len(frustration_ids)
-                if frustration_count > 0:
-                    print(f"    😤 Found {frustration_count} frustration-transfer conversations (Transfer due to frustration flag)")
-                guardrail_count += frustration_count
-            except Exception as fe:
-                print(f"    ⚠️  Could not count frustration transfers: {str(fe)}")
+        result_df = session.sql(query).to_pandas()
+
+        guardrail_count = 0
+        if not result_df.empty and 'TOTAL_GUARDRAIL_CONVS' in result_df.columns:
+            guardrail_count = int(result_df['TOTAL_GUARDRAIL_CONVS'].iloc[0])
+
+        if department_name == 'multiple_contract_detector' and guardrail_count > 0:
+            print(f"    😤 Frustration transfers included in UNION (deduplication applied)")
 
         print(f"    ✅ Found {guardrail_count} conversations with guardrail interventions")
 
