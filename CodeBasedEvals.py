@@ -53,6 +53,9 @@ Full Traceback:
 
 # Agent Intervention Exclusions - Messages to exclude from agent intervention calculation
 AGENT_INTERVENTION_EXCLUSIONS = {
+    'DDC': [
+        'placeholder_message_1',
+    ],
     'CC_Resolvers': [
         'placeholder_message_1',  # Replace with actual exclusion message
     ],
@@ -690,7 +693,21 @@ def get_snowflake_departments_config():
         #     'table_name': 'SILVER.CHAT_EVALS.MV_SALES_CHATS',  # Shared table
         #     'skill_filter': 'GPT_MV_Collect_info',
         #     'bot_filter': 'bot'
-        # }
+        # },
+        'DDC': {
+            'bot_skills': ['GPT_DDC'],
+            'agent_skills': [],
+            'table_name': 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS',
+            'skill_filter': 'gpt_ddc',
+            'bot_filter': 'bot'
+        },
+        'multiple_contract_detector': {
+            'bot_skills': ['MULTIPLE_CONTRACT_DETECTOR'],
+            'agent_skills': [],
+            'table_name': 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS',
+            'skill_filter': 'multiple_contract_detector',
+            'bot_filter': 'bot'
+        }
     }
 
 
@@ -1558,8 +1575,8 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     call_request_phrase = "CallUs"
     complaint_action_phrase = "Review_Complaint"
     
-    # CALL REQUEST DETECTION: Only for CC_Sales and MV_Sales
-    if department_name in ['CC_Sales', 'MV_Sales']:
+    # CALL REQUEST DETECTION: Only for CC_Sales, MV_Sales, and DDC
+    if department_name in ['CC_Sales', 'MV_Sales', 'DDC']:
         # Check for call requests in system private messages
         for _, message in system_private_messages.iterrows():
             message_content = str(message.get('TEXT', '')).lower()
@@ -1964,6 +1981,11 @@ def calculate_proactive_agent_messages_mv_resolvers(session, department_name, de
                     
                     # Condition 2: both "flag_reason":"Frustrated Client" AND {"content"
                     if '"flag_reason":"frustrated client"' in text_lower and '{"content"' in text_lower:
+                        has_known_flow_transfer = True
+                        break
+                    
+                    # Condition 3: Transfer due to frustration flag (multiple_contract_detector)
+                    if 'transfer due to frustration' in text_lower:
                         has_known_flow_transfer = True
                         break
                 
@@ -2803,6 +2825,11 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
                     if '"flag_reason":"frustrated client"' in text_lower and '{"content"' in text_lower:
                         sub_category = 'known_flow_transfer'
                         break
+                    
+                    # Condition 3: Transfer due to frustration flag (multiple_contract_detector)
+                    if 'transfer due to frustration' in text_lower:
+                        sub_category = 'known_flow_transfer'
+                        break
                 
                 # Sub-category 2: Tech_Errors_Transfers (if not Known_Flow_Transfer)
                 if not sub_category:
@@ -2993,62 +3020,95 @@ def calculate_transfers_due_to_tech_error(session, department_name, departments_
 def calculate_total_guardrail(session, department_name, departments_config, target_date):
     """
     Calculate total guardrail interventions for departments with guardrails.
-    Currently supports: MV_Resolvers, CC_Resolvers
-    
+    Currently supports: MV_Resolvers, CC_Resolvers, multiple_contract_detector
+
     Counts distinct conversations from the three main guardrail tables:
     1. GUARDRAIL_STOPPED_TOOLS (wrong tools)
     2. GUARDRAIL_MISSED_TOOLS (missed tools)
     3. GUARDRAIL_FALSE_PROMISE_NO_TOOL (false promises with no tool)
-    
+
+    For multiple_contract_detector:
+    - Code-based evals only (excluding agent-related metrics, since there are no agents
+      and we do not care if the chat goes to seniors of other departments)
+    - Guardrails counted: Wrong tool calls, Missed tool calls, False promises
+    - Also counts: Frustrations caught through the transfer_tool
+      (flag: Transfer due to frustration) from the raw chat table
+
     Args:
         session: Snowflake session
-        department_name: Department name (MV_Resolvers or CC_Resolvers)
+        department_name: Department name (MV_Resolvers, CC_Resolvers, or multiple_contract_detector)
         departments_config: Department configuration
         target_date: Target date for analysis
-    
+
     Returns:
         int: Number of conversations with guardrail interventions
     """
     # Only applies to departments with guardrails
-    if department_name not in ['MV_Resolvers', 'CC_Resolvers']:
+    if department_name not in ['MV_Resolvers', 'CC_Resolvers', 'multiple_contract_detector']:
         return 0
-    
+
     try:
-        # SQL query to count distinct conversations across all guardrail tables
+        print(f"    🛡️  Calculating total guardrail interventions for {department_name}...")
+
+        # Base guardrail tables query (wrong tools, missed tools, false promises)
         query = f"""
         SELECT COUNT(DISTINCT conversation_id) as TOTAL_GUARDRAIL_CONVS
         FROM (
             SELECT DISTINCT CONVERSATION_ID
             FROM GUARDRAIL_STOPPED_TOOLS
             WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
-            
+
             UNION
-            
+
             SELECT DISTINCT CONVERSATION_ID
             FROM GUARDRAIL_MISSED_TOOLS
             WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
-            
+
             UNION
-            
+
             SELECT DISTINCT CONVERSATION_ID
             FROM GUARDRAIL_FALSE_PROMISE_NO_TOOL
             WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
         ) all_guardrails
         """
-        
-        print(f"    🛡️  Calculating total guardrail interventions for {department_name}...")
-        
-        # Execute query and get count
+
         result_df = session.sql(query).to_pandas()
-        
+
         guardrail_count = 0
         if not result_df.empty and 'TOTAL_GUARDRAIL_CONVS' in result_df.columns:
             guardrail_count = int(result_df['TOTAL_GUARDRAIL_CONVS'].iloc[0])
-        
+
+        # For multiple_contract_detector: also count frustration transfers from raw chat table
+        # (flag: Transfer due to frustration via the transfer_tool)
+        if department_name == 'multiple_contract_detector':
+            dept_config = departments_config.get(department_name, {})
+            table_name = dept_config.get('table_name', 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS')
+            bot_skills = dept_config.get('bot_skills', [])
+            filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+            skills_list = "', '".join(bot_skills)
+
+            frustration_query = f"""
+            SELECT DISTINCT CONVERSATION_ID
+            FROM {table_name}
+            WHERE DATE(UPDATED_AT) = '{filter_date}'
+              AND UPPER(TEXT) LIKE '%TRANSFER DUE TO FRUSTRATION%'
+              AND UPPER(TARGET_SKILL_PER_MESSAGE) IN ('{skills_list.upper()}')
+            """
+
+            try:
+                frustration_df = session.sql(frustration_query).to_pandas()
+                frustration_ids = set(frustration_df['CONVERSATION_ID'].values) if not frustration_df.empty else set()
+                frustration_count = len(frustration_ids)
+                if frustration_count > 0:
+                    print(f"    😤 Found {frustration_count} frustration-transfer conversations (Transfer due to frustration flag)")
+                guardrail_count += frustration_count
+            except Exception as fe:
+                print(f"    ⚠️  Could not count frustration transfers: {str(fe)}")
+
         print(f"    ✅ Found {guardrail_count} conversations with guardrail interventions")
-        
+
         return guardrail_count
-        
+
     except Exception as e:
         print(f"    ⚠️  Error calculating guardrail interventions: {str(e)}")
         return 0
@@ -5015,8 +5075,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     # if department_name == 'MV_Resolvers':
     #     print(f"    ⚠️  MV_Resolvers proactive agent metrics: DISABLED")
     
-    # Calculate guardrail interventions for departments that support it (MV_Resolvers, CC_Resolvers)
-    if department_name in ['MV_Resolvers', 'CC_Resolvers']:
+    # Calculate guardrail interventions for departments that support it
+    if department_name in ['MV_Resolvers', 'CC_Resolvers', 'multiple_contract_detector']:
         total_guardrail_count = calculate_total_guardrail(
             session, department_name, departments_config, target_date
         )
@@ -5058,6 +5118,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'CHATS_WITH_EXACTLY_1_AGENT_MESSAGE_PERCENTAGE': 0.0,
             'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES': 0,
             'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE': 0.0,
+            'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES': 0,
+            'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': 0.0,
             'complaint_action_count': 0,
             'complaint_action_percentage': 0.0,
             'proactive_agent_messages_count': proactive_agent_messages_count,
@@ -5131,6 +5193,10 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     chats_with_pokes = 0  # New counter for conversations with any poke messages
     chats_with_exactly_1_agent_message = 0
     chats_with_exactly_2_agent_messages = 0
+    chats_with_exactly_3_agent_messages = 0
+    # Initialize avg bot messages before transfer accumulators
+    transferred_bot_messages_total = 0
+    transferred_conversation_count = 0
     call_requests_count = 0
     
     # Initialize intervention counters
@@ -5231,17 +5297,21 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         if has_poke:
             chats_with_pokes += 1
         
-        # Count conversations with exactly 1 or exactly 2 agent messages from allowed skills (regardless of bot_handled status)
+        # Count conversations with exactly 1, 2, or 3 agent messages from allowed skills (regardless of bot_handled status)
         if agent_messages_from_allowed_skills == 1:
             chats_with_exactly_1_agent_message += 1
         if agent_messages_from_allowed_skills == 2:
             chats_with_exactly_2_agent_messages += 1
+        if agent_messages_from_allowed_skills == 3:
+            chats_with_exactly_3_agent_messages += 1
         
         # Check for intervention conversations (regardless of bot_handled status)
         # This captures system transfers from bot to agent skills even if no agent messages were sent
         if has_valid_system_transfer:
+            # Track bot messages in transferred conversations for avg_bot_msgs_before_transfer
+            transferred_bot_messages_total += bot_message_count
+            transferred_conversation_count += 1
             # Store intervention conversation data
-            
             intervention_conversations_data.append({
                 'CONVERSATION_ID': conv_id,
                 'DEPARTMENT_NAME': department_name,
@@ -5268,6 +5338,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     # Calculate percentages for new metrics
     chats_with_exactly_1_agent_message_percentage = (chats_with_exactly_1_agent_message / total_conversations * 100) if total_conversations > 0 else 0
     chats_with_exactly_2_agent_messages_percentage = (chats_with_exactly_2_agent_messages / total_conversations * 100) if total_conversations > 0 else 0
+    chats_with_exactly_3_agent_messages_percentage = (chats_with_exactly_3_agent_messages / total_conversations * 100) if total_conversations > 0 else 0
     
     # Calculate percentage for CC_Resolvers complaint actions
     complaint_action_percentage = (complaint_action_count / total_conversations * 100) if total_conversations > 0 else 0
@@ -5394,6 +5465,13 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'CHATS_WITH_EXACTLY_1_AGENT_MESSAGE_PERCENTAGE': chats_with_exactly_1_agent_message_percentage,
         'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES': chats_with_exactly_2_agent_messages,
         'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE': chats_with_exactly_2_agent_messages_percentage,
+        'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES': chats_with_exactly_3_agent_messages,
+        'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': chats_with_exactly_3_agent_messages_percentage,
+        'avg_bot_msgs_before_transfer': (
+            round(transferred_bot_messages_total / transferred_conversation_count, 2)
+            if transferred_conversation_count > 0 else None
+        ),
+        'transferred_conversation_count': transferred_conversation_count,
         'complaint_action_count': complaint_action_count,
         'complaint_action_percentage': complaint_action_percentage,
         'proactive_agent_messages_count': proactive_agent_messages_count,
@@ -5457,6 +5535,11 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     print(f"       - 1+ agent messages (excluding pokes): {chats_with_1_plus_agent_messages_excluding_pokes} ({chats_with_1_plus_excluding_pokes_percentage:.1f}%)")
     print(f"       - Exactly 1 agent message (from allowed skills): {chats_with_exactly_1_agent_message} ({chats_with_exactly_1_agent_message_percentage:.1f}%)")
     print(f"       - Exactly 2 agent messages (from allowed skills): {chats_with_exactly_2_agent_messages} ({chats_with_exactly_2_agent_messages_percentage:.1f}%)")
+    print(f"       - Exactly 3 agent messages (from allowed skills): {chats_with_exactly_3_agent_messages} ({chats_with_exactly_3_agent_messages_percentage:.1f}%)")
+    # Print avg bot messages before transfer
+    avg_bot_msgs = transferred_bot_messages_total / transferred_conversation_count if transferred_conversation_count > 0 else None
+    if avg_bot_msgs is not None:
+        print(f"    🤖 Avg bot messages before transfer: {avg_bot_msgs:.2f} (over {transferred_conversation_count} transferred convs)")
     print(f"    📞 Call requests: {call_requests_count} ({call_requests_percentage:.1f}%)")
     
     # CC_Resolvers specific: Print complaint action stats
@@ -6853,6 +6936,10 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'CHATS_WITH_EXACTLY_1_AGENT_MESSAGE_PERCENTAGE': round(bot_data.get('CHATS_WITH_EXACTLY_1_AGENT_MESSAGE_PERCENTAGE', 0), 2),
             'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES': bot_data.get('CHATS_WITH_EXACTLY_2_AGENT_MESSAGES', 0),
             'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE', 0), 2),
+            'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES': bot_data.get('CHATS_WITH_EXACTLY_3_AGENT_MESSAGES', 0),
+            'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE', 0), 2),
+            'AVG_BOT_MSGS_BEFORE_TRANSFER': bot_data.get('avg_bot_msgs_before_transfer', None),
+            'TRANSFERRED_CONVERSATION_COUNT': bot_data.get('transferred_conversation_count', 0),
             
             # Call Requests Metrics
             'Call_Requests_Count': bot_data.get('call_requests_count', 0),
@@ -7082,6 +7169,10 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'CHATS_WITH_EXACTLY_1_AGENT_MESSAGE_PERCENTAGE': 'FLOAT',
                 'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES': 'NUMBER',
                 'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE': 'FLOAT',
+                'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES': 'NUMBER',
+                'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': 'FLOAT',
+                'AVG_BOT_MSGS_BEFORE_TRANSFER': 'FLOAT',
+                'TRANSFERRED_CONVERSATION_COUNT': 'NUMBER',
                 'Call_Requests_Count': 'NUMBER',
                 'Call_Requests_Percentage': 'FLOAT',
                 'Agent_Intervention_Percentage': 'FLOAT',
@@ -10253,6 +10344,10 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'CHATS_WITH_EXACTLY_1_AGENT_MESSAGE_PERCENTAGE': round(bot_data.get('CHATS_WITH_EXACTLY_1_AGENT_MESSAGE_PERCENTAGE', 0), 2),
             'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES': bot_data.get('CHATS_WITH_EXACTLY_2_AGENT_MESSAGES', 0),
             'CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE', 0), 2),
+            'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES': bot_data.get('CHATS_WITH_EXACTLY_3_AGENT_MESSAGES', 0),
+            'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE', 0), 2),
+            'AVG_BOT_MSGS_BEFORE_TRANSFER': bot_data.get('avg_bot_msgs_before_transfer', None),
+            'TRANSFERRED_CONVERSATION_COUNT': bot_data.get('transferred_conversation_count', 0),
             
             # Call Requests Metrics (Phase 2)
             'Call_Requests_Count': bot_data.get('call_requests_count', 0),
