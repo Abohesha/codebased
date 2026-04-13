@@ -51,6 +51,59 @@ Full Traceback:
 {'=' * 50}
 """
 
+def infer_tool_message_type(text_value, department_name=None):
+    """
+    Inspect TEXT field (string or dict) and infer if it's a tool or tool response message.
+    Criteria:
+    - Must parse to a dict and contain a 'content' object
+    - If it has 'tool_calls' -> return 'tool'
+    - If it has 'tool_call_id' -> return 'tool response'
+    Returns 'tool' | 'tool response' | None
+    """
+    try:
+        parsed = None
+        if isinstance(text_value, dict):
+            parsed = text_value
+        elif isinstance(text_value, str):
+            text_str = text_value.strip()
+            if text_str.startswith('{') and text_str.endswith('}'):
+                # Attempt strict JSON parse; if it fails, remove trailing commas before } or ] and retry
+                try:
+                    parsed = json.loads(text_str)
+                except Exception:
+                    cleaned_str = re.sub(r',\s*([}\]])', r'\1', text_str)
+                    try:
+                        parsed = json.loads(cleaned_str)
+                    except Exception:
+                        return None
+        if not isinstance(parsed, dict):
+            return None
+
+        # General detection first (top-level)
+        if parsed.get('tool_calls'):
+            return 'tool'
+        if parsed.get('tool_call_id'):
+            return 'tool response'
+
+        # Also check inside content if it's a dict
+        content_obj = parsed.get('content')
+        if isinstance(content_obj, dict):
+            if content_obj.get('tool_calls'):
+                return 'tool'
+            if content_obj.get('tool_call_id'):
+                return 'tool response'
+
+        # Fallback: detect messages shaped like {"name": <str>, "arguments": { ... }}
+        name_exists = 'name' in parsed and isinstance(parsed.get('name'), str) and parsed.get('name')
+        arguments_obj = parsed.get('arguments')
+        arguments_is_object = isinstance(arguments_obj, dict)
+        if name_exists and arguments_is_object:
+            return 'tool'
+
+        return None
+    except Exception:
+        return None
+
 # Agent Intervention Exclusions - Messages to exclude from agent intervention calculation
 AGENT_INTERVENTION_EXCLUSIONS = {
     'DDC': [
@@ -590,7 +643,7 @@ def get_snowflake_departments_config():
                 'Filipina_in_PHl_Pending_OEC_From_maid', 'Filipina_in_PHl_Pending_Passport', 'Filipina_in_PHl_Pending_Ticket',
                 'Filipina_in_PHl_Pending_valid_visa', 'Filipina_in_PHl_Ticket_Booked',
                'Filipina_Outside_UAE_Pending_Joining_Date', 'Filipina_Outside_Upcoming_Joining',
-                'GPT_MAIDSAT_FILIPINA_UAE'
+                'GPT_MAIDSAT_FILIPINA_UAE','Filipina_Outside_UAE_Vacation'
             ],
             'agent_skills': [
                 'NUDGERS_REPETITIVE', 'GPT_FILIPINA_SHADOWERS', 'Nudger_TaxiBooking',
@@ -707,6 +760,14 @@ def get_snowflake_departments_config():
             'table_name': 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS',
             'skill_filter': 'multiple_contract_detector',
             'bot_filter': 'bot'
+        },
+
+         'cleaners': {
+            'bot_skills': ['GPT_AE_SALES'],
+            'agent_skills': ['AE_SALES'],
+            'table_name': 'SILVER.CHAT_EVALS.CLEANERS_CHATS',
+            'skill_filter': 'GPT_AE_SALES',
+            'bot_filter': 'bot'
         }
     }
 
@@ -814,6 +875,33 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     dept_config = departments_config[department_name]
     agent_skills = dept_config['agent_skills']
     bot_skills = dept_config['bot_skills']
+
+    # Normalize certain message types based on TEXT payload (private/transfer -> tool/tool response)
+    df = df.copy()
+    if 'MESSAGE_TYPE' in df.columns and 'TEXT' in df.columns:
+        msg_type_lower = df['MESSAGE_TYPE'].astype(str).str.lower()
+        mask = msg_type_lower.isin(['private message', 'transfer'])
+        if mask.any():
+            inferred_series = df.loc[mask, 'TEXT'].apply(lambda txt: infer_tool_message_type(txt, department_name))
+            has_inferred = inferred_series.notnull()
+            print(f"    🧰 Inferred tool messages: {has_inferred.sum()}")
+            # Debug: check specific MESSAGE_INDEX 60283497 presence and inference status
+            try:
+                if 'MESSAGE_INDEX' in df.columns:
+                    debug_msg_index = 60283497
+                    candidate_idx = df.index[(df['MESSAGE_INDEX'] == debug_msg_index) & mask]
+                    if len(candidate_idx) > 0:
+                        idx0 = candidate_idx[0]
+                        in_inferred = idx0 in inferred_series.index
+                        non_null = bool(has_inferred.get(idx0, False)) if in_inferred else False
+                        inferred_val = inferred_series.get(idx0, None) if in_inferred else None
+                        print(f"    🔎 MESSAGE_INDEX {debug_msg_index}: in_inferred={in_inferred}, non_null={non_null}, value={inferred_val}")
+                    else:
+                        print(f"    🔎 MESSAGE_INDEX {debug_msg_index}: not in current mask (private/transfer)")
+            except Exception as _dbg_err:
+                print(f"    🔎 Debug check failed: {type(_dbg_err).__name__}: {_dbg_err}")
+            if has_inferred.any():
+                df.loc[mask & has_inferred, 'MESSAGE_TYPE'] = inferred_series[has_inferred].str.lower()
     
     # Get all unique conversation IDs
     all_conversations = set(df['CONVERSATION_ID'].unique())
@@ -867,32 +955,19 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     # also the same for conversations_with_bots but using 'through_skill' instead of 'TARGET_SKILL_PER_MESSAGE'
     conversations_with_bots = conversations_with_bots - set(df[df['THROUGH_SKILL'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
     print(f"    🏢 Conversations with department bots after removing N8N_TEST through_skill: {len(conversations_with_bots)}")
-    
-    # # Remove conversations with only one consumer message and this consumer message came after messages from agent/bot
-    # # check the index of the consumer message and the index of the first message from agent/bot
-    # if department_name== "CC_Sales":
-    #     conversations_to_remove = set()
-    #     for conv_id in conversations_with_bots:
-    #         conv_messages = df[df['CONVERSATION_ID'] == conv_id].sort_values('MESSAGE_SENT_TIME').reset_index(drop=True)
-            
-    #         consumer_messages = conv_messages[conv_messages['SENT_BY'].str.lower() == 'consumer']
-    #         agent_bot_messages = conv_messages[conv_messages['SENT_BY'].str.lower().isin(['agent', 'bot','system'])]
-            
-    #         # Only proceed if we have exactly one consumer message and at least one agent/bot message
-    #         if len(consumer_messages) == 1 and len(agent_bot_messages) > 0:
-    #             # Get the position within the chronologically sorted conversation
-    #             consumer_position = conv_messages[conv_messages['SENT_BY'].str.lower() == 'consumer'].index[0]
-    #             first_agent_bot_position = conv_messages[conv_messages['SENT_BY'].str.lower().isin(['agent', 'bot'])].index[0]
-                
-    #             # If the single consumer message came after the first agent/bot message, remove this conversation
-    #             if consumer_position > first_agent_bot_position:
-    #                 conversations_to_remove.add(conv_id)
-        
-    #     # Remove the identified conversations
-    #     conversations_with_bots = conversations_with_bots - conversations_to_remove
-    #     print(f"    🏢 Conversations with department bots after removing conversations with only one consumer message and this consumer message came after messages from agent/bot: {len(conversations_with_bots)}")
 
+    # Extra: Conversations with inferred tool/tool response messages (from private/transfer)
+    tool_like_messages = df[
+        (df['MESSAGE_TYPE'].str.lower().isin(['tool', 'tool response'])) &
+        (df['TARGET_SKILL_PER_MESSAGE'].isin(bot_skills))
+    ]
+    conversations_with_tools = set(tool_like_messages['CONVERSATION_ID'].unique())
+    print(f"    🧰 Conversations with tool/tool response messages: {len(conversations_with_tools)}")
     
+
+    # Combine agent, bot, and tool/tool response conversations
+    conversations_with_service = conversations_with_agents.union(conversations_with_bots).union(conversations_with_tools)
+    print(f"    🏢 Conversations with department service: {len(conversations_with_service)}")
     # Filter 4: Engagement filter - Conversations that meet both criteria
     engagement_valid_conversations = conversations_with_consumer.intersection(conversations_with_service)
     print(f"    ✅ Engagement-valid conversations: {len(engagement_valid_conversations)}")
@@ -938,104 +1013,7 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     # print(f"  🤖 Checking for bot-routed conversations with no responses...")
     bot_routed_no_response = set()  # Empty set - disabled
     
-    # # Get conversations already in filtered_df to avoid duplicates
-    # already_filtered_conversations = set(filtered_df['CONVERSATION_ID'].unique()) if not filtered_df.empty else set()
     
-    # # Find conversations where THROUGH_SKILL contains department bot skills
-    # # but they have NO agent/bot messages (reusing already computed sets)
-    # bot_routed_convs = set()
-    # for conv_id in conversations_with_consumer:
-    #     # Skip if already in filtered results
-    #     if conv_id in already_filtered_conversations:
-    #         continue
-    #     
-    #     # Get first row of conversation
-    #     first_row = df[df['CONVERSATION_ID'] == conv_id].iloc[0]
-    #     through_skill = str(first_row.get('THROUGH_SKILL', ''))
-    #     
-    #     # Parse THROUGH_SKILL as comma-separated values for exact matching
-    #     through_skills_list = [s.strip() for s in through_skill.split(',')]
-    #     
-    #     # Check if any bot_skill is contained in THROUGH_SKILL (exact match)
-    #     if any(bot_skill in through_skills_list for bot_skill in bot_skills):
-    #         bot_routed_convs.add(conv_id)
-    # 
-    # # Find conversations with N8N_TEST to exclude
-    # n8n_convs = set(df[
-    #     df['TARGET_SKILL_PER_MESSAGE'].str.contains('N8N_TEST', na=False, case=False) |
-    #     df['THROUGH_SKILL'].str.contains('N8N_TEST', na=False, case=False)
-    # ]['CONVERSATION_ID'].unique())
-    # 
-    # # Apply all criteria: has consumer, NO agent, NO bot, bot-routed, not N8N_TEST, not already filtered
-    # bot_routed_no_response_candidates = (
-    #     conversations_with_consumer & bot_routed_convs
-    # ) - conversations_with_agents - conversations_with_bots - n8n_convs - already_filtered_conversations
-    # 
-    # print(f"    🤖 Bot-routed conversations (THROUGH_SKILL match): {len(bot_routed_convs)}")
-    # print(f"    🔍 Bot-routed candidates (before validation): {len(bot_routed_no_response_candidates)}")
-    # 
-    # # VALIDATION: Double-check each candidate to ensure it truly has NO agent/bot normal messages from department
-    # bot_routed_no_response = set()
-    # validation_failures = 0
-    # for conv_id in bot_routed_no_response_candidates:
-    #     conv_messages = df[df['CONVERSATION_ID'] == conv_id]
-    #     
-    #     # Combine all department skills (agent + bot) for comprehensive validation
-    #     # Convert to sets if they're lists
-    #     agent_skills_set = set(agent_skills) if isinstance(agent_skills, list) else agent_skills
-    #     bot_skills_set = set(bot_skills) if isinstance(bot_skills, list) else bot_skills
-    #     all_dept_skills = agent_skills_set.union(bot_skills_set)
-    #     
-    #     # Check for ANY agent normal messages with ANY department skills (agent OR bot skills)
-    #     # Agents can respond under bot skills too
-    #     agent_messages = conv_messages[
-    #         (conv_messages['MESSAGE_TYPE'].str.lower() == 'normal message') &
-    #         (conv_messages['SENT_BY'].str.lower() == 'agent') &
-    #         (conv_messages['TARGET_SKILL_PER_MESSAGE'].isin(all_dept_skills))
-    #     ]
-    #     has_agent_response = len(agent_messages) > 0
-    #     
-    #     # Check for ANY bot normal messages with department bot skills
-    #     bot_messages = conv_messages[
-    #         (conv_messages['MESSAGE_TYPE'].str.lower() == 'normal message') &
-    #         (conv_messages['SENT_BY'].str.lower() == 'bot') &
-    #         (conv_messages['TARGET_SKILL_PER_MESSAGE'].isin(bot_skills))
-    #     ]
-    #     has_bot_response = len(bot_messages) > 0
-    #     
-    #     # FINAL STRICT CHECK: Ensure ZERO agent and ZERO bot normal messages (ANY skill, ANY department)
-    #     any_agent_messages = conv_messages[
-    #         (conv_messages['MESSAGE_TYPE'].str.lower() == 'normal message') &
-    #         (conv_messages['SENT_BY'].str.lower() == 'agent')
-    #     ]
-    #     has_any_agent_message = len(any_agent_messages) > 0
-    #     
-    #     any_bot_messages = conv_messages[
-    #         (conv_messages['MESSAGE_TYPE'].str.lower() == 'normal message') &
-    #         (conv_messages['SENT_BY'].str.lower() == 'bot')
-    #     ]
-    #     has_any_bot_message = len(any_bot_messages) > 0
-    #     
-    #     # Check if conversation SKILL is in department skills
-    #     conv_skill = str(conv_messages.iloc[0].get('SKILL', '')).strip()
-    #     skill_in_dept = conv_skill in all_dept_skills if conv_skill else False
-    #     
-    #     # Only add if: no dept agent/bot responses AND no agent/bot messages at all AND SKILL in dept skills
-    #     if not has_agent_response and not has_bot_response and not has_any_agent_message and not has_any_bot_message and skill_in_dept:
-    #         bot_routed_no_response.add(conv_id)
-    #     else:
-    #         validation_failures += 1
-    #         
-    # 
-    # print(f"    ✅ Bot-routed with NO agent/bot responses (after validation): {len(bot_routed_no_response)}")
-    # 
-    # 
-    # 
-    # # Add these conversations to filtered_df
-    # if bot_routed_no_response:
-    #     bot_routed_df = df[df['CONVERSATION_ID'].isin(bot_routed_no_response)]
-    #     filtered_df = pd.concat([filtered_df, bot_routed_df], ignore_index=True)
-    #     print(f"    ➕ Added {len(bot_routed_no_response)} bot-routed-no-response conversations")
     
     print(f"    ⚠️  Bot-routed no-response logic: DISABLED for all departments")
     
@@ -1045,6 +1023,7 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
         'conversations_with_consumer': len(conversations_with_consumer),
         'conversations_with_agents': len(conversations_with_agents),
         'conversations_with_bots': len(conversations_with_bots),
+        'conversations_with_tools': len(conversations_with_tools),
         'conversations_with_service': len(conversations_with_service),
         'engagement_valid_conversations': len(engagement_valid_conversations),
         'conversations_with_bot_skills': len(conversations_with_bot_skills) if apply_filter_5 else 0,
@@ -1055,6 +1034,8 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     
     print(f"    📈 Engagement retention: {filtering_stats['engagement_retention_rate']:.1f}%")
     print(f"    📈 Bot skill retention: {filtering_stats['bot_skill_retention_rate']:.1f}%")
+    
+   
     
     # Apply hi-bye filter as final filter on the engagement filtered_df
     filtered_df, hi_bye_stats = filter_conversations_snowflake_hi_bye(
@@ -1715,7 +1696,8 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
             
             has_valid_system_transfer = True
             break  # Found one valid transfer, no need to continue
-
+    
+    
     # Special case for departments with no agent_skills (e.g. multiple_contract_detector):
     # any transfer FROM a bot_skill TO any other skill (not GPT-initiated) counts as valid.
     if not has_valid_system_transfer and not agent_dept_skills:
@@ -1729,7 +1711,6 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
                     transfer_data.get('to_skill', '') not in bot_skills):
                 has_valid_system_transfer = True
                 break
-    
     # Count bot messages from department-related skills
     bot_message_count = 0
     for _, message in bot_normal_messages.iterrows():
@@ -2362,27 +2343,38 @@ def calculate_total_seniors_callers(session, department_name, departments_config
             
             categorized = False
             
-            # Priority 1: Proactive (first message NOT from consumer/null agent/system normal OR single-row with agent skill)
-            # Condition 1: Check first message pattern
-            first_message = conv_df_sorted[conv_df_sorted['MESSAGE_SEQ'] == 0]
-            if not first_message.empty:
-                first_msg = first_message.iloc[0]
-                sent_by = str(first_msg.get('SENT_BY', '')).lower()
-                agent_name = first_msg.get('AGENT_NAME')
-                message_type = str(first_msg.get('MESSAGE_TYPE', '')).lower()
+            # Priority 1: Proactive (first *chronological* message NOT from consumer/null agent/system normal OR single-row with agent skill)
+            # Use iloc[0] after MESSAGE_SENT_TIME sort — do NOT use MESSAGE_SEQ==0 (can disagree with true order).
+            # If first message has a non-empty TARGET_SKILL_PER_MESSAGE, it must be a dept agent skill; otherwise
+            # another bot (e.g. GPT CC Shadowers) started the thread and this is not senior-initiated proactive.
+            if len(conv_df_sorted) > 0:
+                first_msg = conv_df_sorted.iloc[0]
+                target_skill_first = str(first_msg.get('TARGET_SKILL_PER_MESSAGE', '')).strip()
+                skip_proactive_due_to_non_agent_skill = False
+                if target_skill_first:
+                    first_skill_is_agent = any(
+                        agent_skill.upper() in target_skill_first.upper() for agent_skill in agent_skills
+                    )
+                    if not first_skill_is_agent:
+                        skip_proactive_due_to_non_agent_skill = True
                 
-                # If first message is NOT consumer/null agent/system normal, it's proactive
-                is_proactive = not (
-                    sent_by == 'consumer' or 
-                    agent_name is None or 
-                    pd.isna(agent_name) or
-                    (sent_by == 'system' and 'normal message' in message_type)
-                )
-                
-                if is_proactive:
-                    proactive_conv_ids.add(conv_id)
-                    categorized = True
-                    continue
+                if not skip_proactive_due_to_non_agent_skill:
+                    sent_by = str(first_msg.get('SENT_BY', '')).lower()
+                    agent_name = first_msg.get('AGENT_NAME')
+                    message_type = str(first_msg.get('MESSAGE_TYPE', '')).lower()
+                    
+                    # If first message is NOT consumer/null agent/system normal, it's proactive
+                    is_proactive = not (
+                        sent_by == 'consumer' or 
+                        agent_name is None or 
+                        pd.isna(agent_name) or
+                        (sent_by == 'system' and 'normal message' in message_type)
+                    )
+                    
+                    if is_proactive:
+                        proactive_conv_ids.add(conv_id)
+                        categorized = True
+                        continue
             
             # Condition 2: Single-row conversation with agent skill only
             if len(conv_df_sorted) == 1:
@@ -2722,33 +2714,40 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
             category = None
             sub_category = None
             
-            # Priority 1: Proactive (first message NOT from consumer/null agent/system normal OR single-row with agent skill)
-            # Condition 1: Check first message pattern
-            first_message = conv_df_sorted[conv_df_sorted['MESSAGE_SEQ'] == 0]
-            if not first_message.empty:
-                first_msg = first_message.iloc[0]
-                sent_by = str(first_msg.get('SENT_BY', '')).lower()
-                agent_name = first_msg.get('AGENT_NAME')
-                message_type = str(first_msg.get('MESSAGE_TYPE', '')).lower()
+            # Priority 1: Proactive — chronologically first row + agent skill guard (same as calculate_total_seniors_callers)
+            if len(conv_df_sorted) > 0:
+                first_msg = conv_df_sorted.iloc[0]
+                target_skill_first = str(first_msg.get('TARGET_SKILL_PER_MESSAGE', '')).strip()
+                skip_proactive_due_to_non_agent_skill = False
+                if target_skill_first:
+                    first_skill_is_agent = any(
+                        agent_skill.upper() in target_skill_first.upper() for agent_skill in agent_skills
+                    )
+                    if not first_skill_is_agent:
+                        skip_proactive_due_to_non_agent_skill = True
                 
-                # If first message is NOT consumer/null agent/system normal, it's proactive
-                is_proactive = not (
-                    sent_by == 'consumer' or 
-                    agent_name is None or 
-                    pd.isna(agent_name) or
-                    (sent_by == 'system' and 'normal message' in message_type)
-                )
-                
-                if is_proactive:
-                    category = 'proactive'
-                    breakdown_records.append({
-                        'TARGET_DATE': target_date,
-                        'CONVERSATION_ID': conv_id,
-                        'CATEGORY': category,
-                        'SUB_CATEGORY': None,
-                        'THROUGH_SKILLS': through_skills
-                    })
-                    continue
+                if not skip_proactive_due_to_non_agent_skill:
+                    sent_by = str(first_msg.get('SENT_BY', '')).lower()
+                    agent_name = first_msg.get('AGENT_NAME')
+                    message_type = str(first_msg.get('MESSAGE_TYPE', '')).lower()
+                    
+                    is_proactive = not (
+                        sent_by == 'consumer' or 
+                        agent_name is None or 
+                        pd.isna(agent_name) or
+                        (sent_by == 'system' and 'normal message' in message_type)
+                    )
+                    
+                    if is_proactive:
+                        category = 'proactive'
+                        breakdown_records.append({
+                            'TARGET_DATE': target_date,
+                            'CONVERSATION_ID': conv_id,
+                            'CATEGORY': category,
+                            'SUB_CATEGORY': None,
+                            'THROUGH_SKILLS': through_skills
+                        })
+                        continue
             
             # Condition 2: Single-row conversation with agent skill only
             if len(conv_df_sorted) == 1:
@@ -3836,7 +3835,7 @@ def analyze_guardrail_missed_tools(session, df, department_name, target_date):
                             escalation_risk = gpt_response_json.get('EscalationRiskAssessment', None)
                     except json.JSONDecodeError:
                         # GPT response is not valid JSON, keep as string
-                        # print(f"    ⚠️ GPT Response is not valid JSON: {gpt_response_caught}")
+                        print(f"    ⚠️ GPT Response is not valid JSON: {gpt_response_caught}")
                         pass
                 
                 # Extract all categories used in this conversation
@@ -5136,6 +5135,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': 0.0,
             'complaint_action_count': 0,
             'complaint_action_percentage': 0.0,
+            'chats_with_no_bot_messages_count': 0,
+            'chats_with_no_bot_messages_percentage': 0.0,
             'proactive_agent_messages_count': proactive_agent_messages_count,
             'proactive_agent_messages_percentage': 0.0,
             'directly_handled_by_seniors_count': directly_handled_by_seniors_count,
@@ -5187,9 +5188,10 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'guardrail_agent_percentage': 0.0,
             'tech_error_transfers_count': tech_error_transfers_count,
             'tech_error_transfers_percentage': 0.0,
-            'mcd_mv_transfer_count': 0,
+             'mcd_mv_transfer_count': 0,
             'mcd_cc_transfer_count': 0
         }
+        
     
     # Group by conversation ID
     conversations = df.groupby('CONVERSATION_ID')
@@ -5214,7 +5216,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     transferred_bot_messages_total = 0
     transferred_conversation_count = 0
     call_requests_count = 0
-
+    
     # multiple_contract_detector: count transfers to MV_Resolvers vs CC_Resolvers
     mcd_mv_transfer_count = 0
     mcd_cc_transfer_count = 0
@@ -5227,7 +5229,6 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         _cc_all_skills = set(
             s.upper() for s in _cc_cfg.get('bot_skills', []) + _cc_cfg.get('agent_skills', [])
         )
-    
     # Initialize intervention counters
     total_counted_agent_messages = 0
     total_bot_messages = 0
@@ -5238,12 +5239,26 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     # Initialize CC_Resolvers specific counter for complaint actions
     complaint_action_count = 0
     
+    # Initialize CC_Resolvers specific: Track conversations with no bot messages from GPT_CC_RESOLVERS
+    chats_with_no_bot_messages_count = 0
+    
     # Initialize intervention conversations data collection
     intervention_conversations_data = []
     chats_with_n_plus_agent_messages_data = []
     
     for conv_id, conv_df in conversations:
         is_bot_handled, agent_message_count, has_call_request, counted_agent_messages, bot_message_count, is_bot_handled_excluding_fillers, has_valid_system_transfer, agent_message_count_excluding_pokes, agent_messages_from_allowed_skills, has_complaint_action = is_conversation_fully_handled_by_bot_snowflake(conv_df, department_name, departments_config)
+        
+        # CC_Resolvers specific: Track conversations with NO bot normal messages from GPT_CC_RESOLVERS
+        if department_name == 'CC_Resolvers':
+            bot_cc_resolvers_messages = conv_df[
+                (conv_df['SENT_BY'].str.upper() == 'BOT') &
+                (conv_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE') &
+                (conv_df['TARGET_SKILL_PER_MESSAGE'].str.upper() == 'GPT_CC_RESOLVERS')
+            ]
+            
+            if len(bot_cc_resolvers_messages) == 0:
+                chats_with_no_bot_messages_count += 1
         
 
         # Track intervention metrics across all conversations
@@ -5348,9 +5363,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
                 'AGENT_MESSAGE_COUNT': agent_message_count,
                 'ANALYSIS_DATE': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             })
-
-            # multiple_contract_detector: classify each transferred conversation as MV or CC
-            if department_name == 'multiple_contract_detector':
+         # multiple_contract_detector: classify each transferred conversation as MV or CC
+        if department_name == 'multiple_contract_detector':
                 _sys_msgs = conv_df[
                     (conv_df['SENT_BY'].str.upper() == 'SYSTEM') &
                     ((conv_df['MESSAGE_TYPE'].str.upper() == 'PRIVATE MESSAGE') |
@@ -5391,6 +5405,10 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     
     # Calculate percentage for CC_Resolvers complaint actions
     complaint_action_percentage = (complaint_action_count / total_conversations * 100) if total_conversations > 0 else 0
+    
+    # Calculate percentage for CC_Resolvers chats with no bot messages
+    chats_with_no_bot_messages_percentage = (chats_with_no_bot_messages_count / total_conversations * 100) if total_conversations > 0 else 0
+    
     # Calculate percentage for poke conversations
     chats_with_pokes_percentage = (chats_with_pokes / total_conversations * 100) if total_conversations > 0 else 0
     
@@ -5523,6 +5541,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'transferred_conversation_count': transferred_conversation_count,
         'complaint_action_count': complaint_action_count,
         'complaint_action_percentage': complaint_action_percentage,
+        'chats_with_no_bot_messages_count': chats_with_no_bot_messages_count,
+        'chats_with_no_bot_messages_percentage': chats_with_no_bot_messages_percentage,
         'proactive_agent_messages_count': proactive_agent_messages_count,
         'proactive_agent_messages_percentage': proactive_agent_messages_percentage,
         'directly_handled_by_seniors_count': directly_handled_by_seniors_count,
@@ -5596,6 +5616,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     # CC_Resolvers specific: Print complaint action stats
     if department_name == 'CC_Resolvers':
         print(f"    🚨 Complaint actions (Open_or_CommentOn_Complaint): {complaint_action_count} ({complaint_action_percentage:.1f}%)")
+        print(f"    ⚠️  Chats with no bot messages from GPT_CC_RESOLVERS: {chats_with_no_bot_messages_count} ({chats_with_no_bot_messages_percentage:.1f}%)")
     
     # MV_RESOLVERS PROACTIVE AGENT METRICS PRINT DISABLED
     # # MV_Resolvers specific: Print proactive agent metrics
@@ -5810,9 +5831,6 @@ def analyze_bot_handled_conversations_all_departments(session: snowpark.Session,
             bot_results = analyze_bot_handled_conversations_single_department(
                 session, filtered_df, department_name, departments_config, target_date
             )
-            
-            # Attach filtering funnel data so exclusion counts reach the summary table
-            bot_results['filtering_stats'] = phase1_stats
             
             department_results[department_name] = bot_results
             
@@ -6966,6 +6984,20 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             print(f"DEBUG: CC_Sales bot_data keys: {list(bot_data.keys())}")
             print(f"DEBUG: CC_Sales excluding pokes values: {bot_data.get('chats_with_1_plus_agent_messages_excluding_pokes', 'MISSING')}, {bot_data.get('chats_with_1_plus_agent_messages_excluding_pokes_percentage', 'MISSING')}")
         
+        # Debug output for chats with no bot messages (CC_Resolvers)
+        if department_name == 'CC_Resolvers':
+            print(f"DEBUG: CC_Resolvers bot_data keys present: {'chats_with_no_bot_messages_count' in bot_data}, {'chats_with_no_bot_messages_percentage' in bot_data}")
+            print(f"DEBUG: CC_Resolvers no bot messages values: COUNT={bot_data.get('chats_with_no_bot_messages_count', 'MISSING')}, PERCENTAGE={bot_data.get('chats_with_no_bot_messages_percentage', 'MISSING')}")
+        _fs = bot_data.get('filtering_stats', {})
+        _total_original      = _fs.get('total_original_conversations', 0)
+        _engagement_valid    = _fs.get('engagement_valid_conversations', 0)
+        _bot_skills_valid    = _fs.get('conversations_with_bot_skills', 0)
+        excluded_no_engagement = max(_total_original - _engagement_valid, 0)
+        excluded_no_bot_skill  = max(_engagement_valid - _bot_skills_valid, 0)
+        excluded_hi_bye        = _fs.get('hi_bye_conversations_removed', 0)
+        excluded_wrong_date    = _fs.get('conversations_filtered_by_date', 0)
+        total_excluded         = max(_total_original - bot_data.get('total_conversations', 0), 0)
+        
         metrics = {
             'Date': current_date,
             'Department': department_name,
@@ -6996,6 +7028,19 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'TRANSFERRED_CONVERSATION_COUNT': bot_data.get('transferred_conversation_count', 0),
             'MCD_MV_TRANSFER_COUNT': bot_data.get('mcd_mv_transfer_count', 0),
             'MCD_CC_TRANSFER_COUNT': bot_data.get('mcd_cc_transfer_count', 0),
+            # Exclusion breakdown: chats removed on the way from ChatCC to Chats_Supposed_to_be_Bot_Handled
+            'Excluded_No_Engagement_Chats': excluded_no_engagement,
+            'Excluded_No_Bot_Skill_Chats':  excluded_no_bot_skill,
+            'Excluded_Hi_Bye_Chats':        excluded_hi_bye,
+            'Excluded_Wrong_Date_Chats':    excluded_wrong_date,
+            'Total_Excluded_Chats':         total_excluded,
+            'Bot_Handled_Count': bot_data.get('bot_handled_count', 0),
+            'Bot_Handled_Percentage': round(bot_data.get('bot_handled_percentage', 0), 2),
+            # CC_Resolvers Specific Metrics
+            'COMPLAINT_ACTION_COUNT': bot_data.get('complaint_action_count', 0),
+            'COMPLAINT_ACTION_PERCENTAGE': round(bot_data.get('complaint_action_percentage', 0), 2),
+            'CHATS_WITH_NO_BOT_MESSAGES_COUNT': bot_data.get('chats_with_no_bot_messages_count', 0),
+            'CHATS_WITH_NO_BOT_MESSAGES_PERCENTAGE': round(bot_data.get('chats_with_no_bot_messages_percentage', 0), 2),
             
             # Call Requests Metrics
             'Call_Requests_Count': bot_data.get('call_requests_count', 0),
@@ -7052,6 +7097,10 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
         # Debug output for final metrics in regular function
         if department_name == 'CC_Sales':
             print(f"DEBUG FINAL REGULAR: CC_Sales final metrics excluding pokes: {metrics.get('CHATS_WITH_1_PLUS_AGENT_MESSAGES_EXCLUDING_POKES', 'MISSING')}, {metrics.get('CHATS_WITH_1_PLUS_AGENT_MESSAGES_EXCLUDING_POKES_PERCENTAGE', 'MISSING')}")
+        
+        # Debug output for final metrics for CC_Resolvers
+        if department_name == 'CC_Resolvers':
+            print(f"DEBUG FINAL REGULAR: CC_Resolvers final metrics no bot messages: COUNT={metrics.get('CHATS_WITH_NO_BOT_MESSAGES_COUNT', 'MISSING')}, PERCENTAGE={metrics.get('CHATS_WITH_NO_BOT_MESSAGES_PERCENTAGE', 'MISSING')}")
         
         combined_metrics.append(metrics)
     
@@ -7241,6 +7290,8 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'Agent_Intervention_Percentage': 'FLOAT',
                 'COMPLAINT_ACTION_COUNT': 'NUMBER',
                 'COMPLAINT_ACTION_PERCENTAGE': 'FLOAT',
+                'CHATS_WITH_NO_BOT_MESSAGES_COUNT': 'NUMBER',
+                'CHATS_WITH_NO_BOT_MESSAGES_PERCENTAGE': 'FLOAT',
                 'PROACTIVE_AGENT_MESSAGES_COUNT': 'NUMBER',
                 'PROACTIVE_AGENT_MESSAGES_PERCENTAGE': 'FLOAT',
                 'DIRECTLY_HANDLED_BY_SENIORS_COUNT': 'NUMBER',
@@ -7393,7 +7444,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
             table_columns_result = session.sql(table_cols_query).collect()
             table_columns = [row['COLUMN_NAME'] for row in table_columns_result]
             print(f"DEBUG: Table expects {len(table_columns)} columns: {table_columns}")
-            
+
             # Add any new columns from the DataFrame that are missing in the Snowflake table
             table_columns_upper = [c.upper() for c in table_columns]
             new_col_type_map = {
@@ -7413,7 +7464,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                     session.sql(alter_query).collect()
                     table_columns.append(df_col)
                     print(f"DEBUG: Added new column to table: {df_col}")
-
+            
             # Add missing columns with None values
             for col in table_columns:
                 if col not in new_metrics_df.columns:
@@ -7794,13 +7845,13 @@ def calculate_chats_fully_handled_by_agents(session: snowpark.Session, target_da
             all_skills = list(set(bot_skills + agent_skills))
             nationality = mapping['nationality']
             location_category = mapping['location_category']
-            
+
             all_skills_sql = ", ".join(f"'{s}'" for s in all_skills)
-            
+
             print(f"  🔍 Debug: target_date = {target_date}")
             print(f"  🔍 Debug: nationality = {nationality}, location = {location_category}")
             print(f"  🔍 Debug: all_skills count = {len(all_skills)} (bot={len(bot_skills)}, agent={len(agent_skills)})")
-            
+
             # Run diagnostic query
             debug_query = f"""
             WITH dept_conversations AS (
@@ -7835,7 +7886,7 @@ def calculate_chats_fully_handled_by_agents(session: snowpark.Session, target_da
                 (SELECT COUNT(*) FROM conversations_with_bot) AS with_bot_count,
                 (SELECT COUNT(*) FROM fully_agent_handled) AS fully_agent_handled_count
             """
-            
+
             try:
                 debug_df = session.sql(debug_query).to_pandas()
                 print(f"  📊 Debug Results:")
@@ -7845,7 +7896,7 @@ def calculate_chats_fully_handled_by_agents(session: snowpark.Session, target_da
                 print(f"     - Fully agent-handled (agent YES, bot NO): {debug_df['FULLY_AGENT_HANDLED_COUNT'].iloc[0]}")
             except Exception as debug_e:
                 print(f"  ⚠️  Debug query failed: {str(debug_e)}")
-            
+
             # Main query 
             query = f"""
             WITH dept_conversations AS (
@@ -7900,7 +7951,7 @@ def calculate_chats_fully_handled_by_agents(session: snowpark.Session, target_da
                 COUNT(DISTINCT final_applicant_id) AS unique_applicants
             FROM with_nationality
             """
-            
+
             # Execute query
             result_df = session.sql(query).to_pandas()
             
@@ -9888,7 +9939,6 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
     department_config = departments_config[department_name]
     bot_skills = set(department_config['bot_skills'])
     bot_skills_upper = {s.upper() for s in bot_skills}
-    
     if not bot_skills:
         return False, f"No bot skills configured for department: {department_name}"
     
@@ -9949,7 +9999,7 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
     last_normal_message = normal_messages.iloc[-1]
     target_skill = last_normal_message['TARGET_SKILL_PER_MESSAGE']
     
-    # CASE 1: Last normal message from consumer → UNRESPONSIVE
+   # CASE 1: Last normal message from consumer → UNRESPONSIVE
     if last_normal_message['SENT_BY'].upper() == 'CONSUMER':
         # Check if target_skill is None/NaN/empty or if it's in bot_skills (case-insensitive)
         # Note: astype(str) above converts NaN → 'nan', so we check for that string too
@@ -9960,7 +10010,7 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
         else:
             return False, "Last normal message from consumer but not a bot skill"
     
-    # CASE 2: Check if the conversation ends with NORMAL bot message from department AND there was a delay > 55 mins
+     # CASE 2: Check if the conversation ends with NORMAL bot message from department AND there was a delay > 55 mins
     # The key improvement: We check if the LAST NORMAL MESSAGE is from the department bot
     target_skill_valid = (target_skill is not None and
                           not (isinstance(target_skill, str) and target_skill.lower() in ('nan', 'none', '')))
@@ -9985,7 +10035,7 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
         last_consumer_index = last_consumer_message['MESSAGE_INDEX']
         
         # Step 2: Find the FIRST bot message after the last consumer message
-        # We count ANY bot message as a valid response (not just AT-skill bots)
+         # We count ANY bot message as a valid response (not just AT-skill bots)
         # because routing bots (e.g. GPT_MAIDSAT) also respond in the AT flow context
         try:
             bot_messages_after_consumer = normal_messages[
@@ -9993,15 +10043,16 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
                 (normal_messages['parsed_timestamp'] > last_consumer_time) &
                 (normal_messages['MESSAGE_INDEX'] > last_consumer_index)
             ].sort_values(['parsed_timestamp', 'MESSAGE_INDEX'])
-            
+
             if len(bot_messages_after_consumer) == 0:
                 return False, "No bot messages found after last consumer message"
-            
+
             # Get the FIRST (earliest) bot message after the consumer message
             # Example: Consumer: "Hello" → Bot: "Hi" (THIS ONE for delay calc) → Bot: "How can I help?"
             first_bot_response = bot_messages_after_consumer.iloc[0]
             first_bot_time = first_bot_response['parsed_timestamp']
             first_bot_index = first_bot_response['MESSAGE_INDEX']
+
             
             # Step 3: Calculate delay between consumer message and FIRST bot response
             if pd.isna(first_bot_time) or pd.isna(last_consumer_time):
@@ -10024,7 +10075,7 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
             # A consumer waiting >55 min is unresponsive even if an agent eventually stepped in
             if time_diff_minutes > 55:
                 return True, f"Bot first response after {time_diff_minutes:.1f} minutes (>55min threshold)"
-            
+
             # Only apply intervention check when the delay is within the threshold
             # If an agent/transfer responded quickly, the conversation was handled → not unresponsive
             messages_between = work_df[
@@ -10042,8 +10093,11 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
             ]
             if len(intervention_messages) > 0:
                 return False, "Agent, Transfer, or non-bot skill message happened before bot message"
-            
+
             return False, f"Bot responded within {time_diff_minutes:.1f} minutes"
+
+        except Exception as e:
+            return False, f"Error calculating time difference: {str(e)}"
         
         except Exception as e:
             return False, f"Error calculating time difference: {str(e)}"
@@ -10379,16 +10433,11 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             print(f"DEBUG ENHANCED: CC_Sales bot_data keys: {list(bot_data.keys())}")
             print(f"DEBUG ENHANCED: CC_Sales excluding pokes values: {bot_data.get('chats_with_1_plus_agent_messages_excluding_pokes', 'MISSING')}, {bot_data.get('chats_with_1_plus_agent_messages_excluding_pokes_percentage', 'MISSING')}")
         
-        _fs = bot_data.get('filtering_stats', {})
-        _total_original      = _fs.get('total_original_conversations', 0)
-        _engagement_valid    = _fs.get('engagement_valid_conversations', 0)
-        _bot_skills_valid    = _fs.get('conversations_with_bot_skills', 0)
-        excluded_no_engagement = max(_total_original - _engagement_valid, 0)
-        excluded_no_bot_skill  = max(_engagement_valid - _bot_skills_valid, 0)
-        excluded_hi_bye        = _fs.get('hi_bye_conversations_removed', 0)
-        excluded_wrong_date    = _fs.get('conversations_filtered_by_date', 0)
-        total_excluded         = max(_total_original - bot_data.get('total_conversations', 0), 0)
-
+        # Debug output for chats with no bot messages (CC_Resolvers) in enhanced function
+        if department_name == 'CC_Resolvers':
+            print(f"DEBUG ENHANCED: CC_Resolvers bot_data keys present: {'chats_with_no_bot_messages_count' in bot_data}, {'chats_with_no_bot_messages_percentage' in bot_data}")
+            print(f"DEBUG ENHANCED: CC_Resolvers no bot messages values: COUNT={bot_data.get('chats_with_no_bot_messages_count', 'MISSING')}, PERCENTAGE={bot_data.get('chats_with_no_bot_messages_percentage', 'MISSING')}")
+        
         metrics = {
             'Date': current_date,
             'Department': department_name,
@@ -10396,12 +10445,6 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             # Bot Handling Metrics (Phase 2)
             'Total_Conversations': conversations_without_filter_5_data.get('total_conversations', 0),
             'Chats_Supposed_to_be_Bot_Handled': bot_data.get('total_conversations', 0),
-            # Exclusion breakdown: chats removed on the way from ChatCC to Chats_Supposed_to_be_Bot_Handled
-            'Excluded_No_Engagement_Chats': excluded_no_engagement,
-            'Excluded_No_Bot_Skill_Chats':  excluded_no_bot_skill,
-            'Excluded_Hi_Bye_Chats':        excluded_hi_bye,
-            'Excluded_Wrong_Date_Chats':    excluded_wrong_date,
-            'Total_Excluded_Chats':         total_excluded,
             'Bot_Handled_Count': bot_data.get('bot_handled_count', 0),
             'Bot_Handled_Percentage': round(bot_data.get('bot_handled_percentage', 0), 2),
             
@@ -10426,17 +10469,19 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'TRANSFERRED_CONVERSATION_COUNT': bot_data.get('transferred_conversation_count', 0),
             'MCD_MV_TRANSFER_COUNT': bot_data.get('mcd_mv_transfer_count', 0),
             'MCD_CC_TRANSFER_COUNT': bot_data.get('mcd_cc_transfer_count', 0),
-            
             # Call Requests Metrics (Phase 2)
             'Call_Requests_Count': bot_data.get('call_requests_count', 0),
             'Call_Requests_Percentage': round(bot_data.get('call_requests_percentage', 0), 2),
             
             # Agent Intervention Metrics (Phase 2)
             'Agent_Intervention_Percentage': round(bot_data.get('agent_intervention_percentage', 0), 2),
+
             
             # CC_Resolvers Complaint Action Metrics (Phase 2)
             'COMPLAINT_ACTION_COUNT': bot_data.get('complaint_action_count', 0),
             'COMPLAINT_ACTION_PERCENTAGE': round(bot_data.get('complaint_action_percentage', 0), 2),
+            'CHATS_WITH_NO_BOT_MESSAGES_COUNT': bot_data.get('chats_with_no_bot_messages_count', 0),
+            'CHATS_WITH_NO_BOT_MESSAGES_PERCENTAGE': round(bot_data.get('chats_with_no_bot_messages_percentage', 0), 2),
             
             # MV_Resolvers Proactive Agent Messages Metrics (Phase 2)
             'PROACTIVE_AGENT_MESSAGES_COUNT': bot_data.get('proactive_agent_messages_count', 0),
@@ -10605,6 +10650,10 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
         # Debug output for final metrics in enhanced function
         if department_name == 'CC_Sales':
             print(f"DEBUG FINAL ENHANCED: CC_Sales final metrics excluding pokes: {metrics.get('CHATS_WITH_1_PLUS_AGENT_MESSAGES_EXCLUDING_POKES', 'MISSING')}, {metrics.get('CHATS_WITH_1_PLUS_AGENT_MESSAGES_EXCLUDING_POKES_PERCENTAGE', 'MISSING')}")
+        
+        # Debug output for final metrics for CC_Resolvers in enhanced function
+        if department_name == 'CC_Resolvers':
+            print(f"DEBUG FINAL ENHANCED: CC_Resolvers final metrics no bot messages: COUNT={metrics.get('CHATS_WITH_NO_BOT_MESSAGES_COUNT', 'MISSING')}, PERCENTAGE={metrics.get('CHATS_WITH_NO_BOT_MESSAGES_PERCENTAGE', 'MISSING')}")
         
         combined_metrics.append(metrics)
     
