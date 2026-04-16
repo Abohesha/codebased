@@ -7989,6 +7989,106 @@ def calculate_chats_fully_handled_by_agents(session: snowpark.Session, target_da
 
 
 # ============================================================================
+# CHATS WITH AGENT MESSAGES - SQL-BASED (APPLICANT TRACKING)
+# ============================================================================
+
+def calculate_chats_with_agent_messages_at(session: snowpark.Session, target_date=None):
+    """
+    SQL-based calculation of chats with 1+/2+/3+ agent messages for AT departments.
+    Bypasses engagement filtering to match the CC_CONVERSATIONS reference query logic.
+    """
+    print("\n👨‍💼 CALCULATING CHATS WITH AGENT MESSAGES (AT DEPARTMENTS - SQL)")
+    print("=" * 60)
+
+    departments_config = get_snowflake_departments_config()
+    results = {}
+
+    at_department_mapping = {
+        'AT_Filipina_Outside_UAE': {'nationality': 'Filipina', 'location_category': 'OUTSIDE_UAE'},
+        'AT_Filipina_Inside_UAE': {'nationality': 'Filipina', 'location_category': 'INSIDE_UAE'},
+        'AT_Filipina_In_PHL': {'nationality': 'Filipina', 'location_category': 'PHILIPPINES'},
+        'AT_African': {'nationality': 'Kenyan', 'location_category': 'OUTSIDE_UAE'}
+    }
+
+    for department_name, mapping in at_department_mapping.items():
+        if department_name != DEPARTMENT_FILTER and TEST:
+            continue
+
+        try:
+            print(f"\n🏢 Processing {department_name}...")
+
+            dept_config = departments_config.get(department_name, {})
+            if not dept_config:
+                results[department_name] = {}
+                continue
+
+            bot_skills = dept_config.get('bot_skills', [])
+            agent_skills = dept_config.get('agent_skills', [])
+            all_skills = list(set(bot_skills + agent_skills))
+
+            all_skills_sql = ", ".join(f"'{s}'" for s in all_skills)
+
+            query = f"""
+            WITH dept_conversations AS (
+                SELECT DISTINCT a.CONVERSATION_ID
+                FROM BA_VIEWS.CHAT_EVALS_SILVER.APPLICANTS_CHATS a,
+                     LATERAL FLATTEN(input => SPLIT(a.THROUGH_SKILL, ',')) f
+                WHERE TO_DATE(a.START_DATE) = TO_DATE('{target_date}')
+                  AND TRIM(f.VALUE) IN ({all_skills_sql})
+            ),
+            conversations_with_agent AS (
+                SELECT DISTINCT a.CONVERSATION_ID
+                FROM BA_VIEWS.CHAT_EVALS_SILVER.APPLICANTS_CHATS a
+                WHERE a.CONVERSATION_ID IN (SELECT CONVERSATION_ID FROM dept_conversations)
+                  AND TO_DATE(a.START_DATE) = TO_DATE('{target_date}')
+                  AND UPPER(TRIM(a.SENT_BY)) = 'AGENT'
+            ),
+            agent_normal_msg_counts AS (
+                SELECT a.CONVERSATION_ID,
+                       COUNT(*) AS agent_msg_count
+                FROM BA_VIEWS.CHAT_EVALS_SILVER.APPLICANTS_CHATS a
+                WHERE a.CONVERSATION_ID IN (SELECT CONVERSATION_ID FROM conversations_with_agent)
+                  AND TO_DATE(a.START_DATE) = TO_DATE('{target_date}')
+                  AND UPPER(TRIM(a.SENT_BY)) = 'AGENT'
+                  AND UPPER(a.MESSAGE_TYPE) = 'NORMAL MESSAGE'
+                GROUP BY a.CONVERSATION_ID
+            )
+            SELECT
+                (SELECT COUNT(*) FROM conversations_with_agent) AS chats_1_plus,
+                COUNT(CASE WHEN agent_msg_count >= 2 THEN 1 END) AS chats_2_plus,
+                COUNT(CASE WHEN agent_msg_count >= 3 THEN 1 END) AS chats_3_plus
+            FROM agent_normal_msg_counts
+            """
+
+            result_df = session.sql(query).to_pandas()
+
+            if not result_df.empty:
+                c1 = int(result_df['CHATS_1_PLUS'].iloc[0] or 0)
+                c2 = int(result_df['CHATS_2_PLUS'].iloc[0] or 0)
+                c3 = int(result_df['CHATS_3_PLUS'].iloc[0] or 0)
+            else:
+                c1, c2, c3 = 0, 0, 0
+
+            results[department_name] = {
+                'chats_with_1_plus_agent_messages': c1,
+                'chats_with_2_plus_agent_messages': c2,
+                'chats_with_3_plus_agent_messages': c3,
+            }
+
+            print(f"  ✅ {department_name}: 1+={c1}, 2+={c2}, 3+={c3}")
+
+        except Exception as e:
+            print(f"  ❌ {department_name}: Error - {str(e)}")
+            results[department_name] = {}
+
+    total_1plus = sum(r.get('chats_with_1_plus_agent_messages', 0) for r in results.values())
+    print(f"\n📊 SUMMARY - CHATS WITH AGENT MESSAGES (SQL):")
+    print(f"   👨‍💼 Total 1+ agent messages across AT departments: {total_1plus:,}")
+
+    return results
+
+
+# ============================================================================
 # PHASE 3: ADVANCED ANALYTICS EXTENSION
 # Add these functions to your existing snowflake_phase2_core_analytics.py file
 # ============================================================================
@@ -10349,7 +10449,7 @@ def analyze_unresponsive_conversations_all_departments(session: snowpark.Session
 # ENHANCED MASTER TABLE INTEGRATION
 # ============================================================================
 
-def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, similarity_results, delay_results, unresponsive_results, shadowing_results, issues_results, conversations_without_filter_5, intervention_reengagement_results, downtime_results, fully_handled_results, target_date=None):
+def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, similarity_results, delay_results, unresponsive_results, shadowing_results, issues_results, conversations_without_filter_5, intervention_reengagement_results, downtime_results, fully_handled_results, target_date=None, agent_messages_at_results=None):
     """
     Create enhanced combined metrics from all analysis phases.
     
@@ -10647,6 +10747,23 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'UNIQUE_APPLICANTS_FULLY_HANDLED': fully_handled_data.get('unique_applicants', 0),
         }
         
+        # Override agent message counts for AT departments with SQL-based values
+        AT_DEPARTMENTS = {'AT_Filipina', 'AT_Filipina_In_PHL', 'AT_Filipina_Outside_UAE', 'AT_Filipina_Inside_UAE', 'AT_African', 'Gulf_maids'}
+        if agent_messages_at_results and department_name in AT_DEPARTMENTS:
+            at_data = agent_messages_at_results.get(department_name, {})
+            if at_data:
+                total_conv = metrics.get('Chats_Supposed_to_be_Bot_Handled', 0) or metrics.get('Total_Conversations', 0)
+                c1 = at_data.get('chats_with_1_plus_agent_messages', 0)
+                c2 = at_data.get('chats_with_2_plus_agent_messages', 0)
+                c3 = at_data.get('chats_with_3_plus_agent_messages', 0)
+                metrics['Chats_With_1_Plus_Agent_Messages'] = c1
+                metrics['Chats_With_2_Plus_Agent_Messages'] = c2
+                metrics['Chats_With_3_Plus_Agent_Messages'] = c3
+                metrics['Chats_With_1_Plus_Agent_Messages_Percentage'] = round((c1 / total_conv * 100) if total_conv > 0 else 0, 2)
+                metrics['Chats_With_2_Plus_Agent_Messages_Percentage'] = round((c2 / total_conv * 100) if total_conv > 0 else 0, 2)
+                metrics['Chats_With_3_Plus_Agent_Messages_Percentage'] = round((c3 / total_conv * 100) if total_conv > 0 else 0, 2)
+                print(f"  SQL override for {department_name}: 1+={c1}, 2+={c2}, 3+={c3}")
+        
         # Debug output for final metrics in enhanced function
         if department_name == 'CC_Sales':
             print(f"DEBUG FINAL ENHANCED: CC_Sales final metrics excluding pokes: {metrics.get('CHATS_WITH_1_PLUS_AGENT_MESSAGES_EXCLUDING_POKES', 'MISSING')}, {metrics.get('CHATS_WITH_1_PLUS_AGENT_MESSAGES_EXCLUDING_POKES_PERCENTAGE', 'MISSING')}")
@@ -10924,10 +11041,14 @@ def phase3_advanced_analytics_processor(session: snowpark.Session, target_date=N
         print("\n🤝 CALCULATING CHATS FULLY HANDLED BY AGENTS...")
         fully_handled_results = calculate_chats_fully_handled_by_agents(session, target_date)
         
+        # CHATS WITH AGENT MESSAGES (SQL-based) - Applicant Tracking departments
+        print("\n👨‍💼 CALCULATING CHATS WITH AGENT MESSAGES (SQL)...")
+        agent_messages_at_results = calculate_chats_with_agent_messages_at(session, target_date)
+        
         # Create Enhanced Combined Metrics
         print(f"\n📊 CREATING ENHANCED COMBINED METRICS...")
         combined_metrics = create_enhanced_combined_metrics_snowflake(
-            bot_results, repetition_results, similarity_results, delay_results, unresponsive_results, shadowing_results, issues_results, conversations_without_filter_5, intervention_reengagement_results, downtime_results, fully_handled_results, target_date
+            bot_results, repetition_results, similarity_results, delay_results, unresponsive_results, shadowing_results, issues_results, conversations_without_filter_5, intervention_reengagement_results, downtime_results, fully_handled_results, target_date, agent_messages_at_results
         )
         print(combined_metrics)
         print(f"  ✅ Created enhanced metrics for {len(combined_metrics)} departments")
