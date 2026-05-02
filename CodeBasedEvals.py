@@ -1350,6 +1350,13 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     
     
     print(f"    ⚠️  Bot-routed no-response logic: DISABLED for all departments")
+
+    # Exclude N8N_TEST conversations from this count to avoid false positives
+    n8n_conv_ids = set(df[df['TARGET_SKILL_PER_MESSAGE'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
+    n8n_conv_ids.update(df[df['THROUGH_SKILL'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
+    consumer_only_chats_count = len(
+        (conversations_with_consumer - conversations_with_service) - n8n_conv_ids
+    )
     
     # Calculate filtering statistics
     filtering_stats = {
@@ -5640,6 +5647,160 @@ def generate_guardrail_summary_by_tool(session, department_name, target_date):
         print(f"    ⚠️  Error generating guardrail summary by tool: {str(e)}")
         return 0
 
+def generate_tool_usage_analysis(session, department_name, target_date):
+    """
+    Generate tool usage analysis showing execution patterns and frequency per tool.
+    
+    For each tool, calculates:
+    - Actual Executions (successful, not stopped by guardrails)
+    - Conversations where tool was called once, twice, or 3+ times
+    
+    Args:
+        session: Snowflake session
+        department_name: Department name
+        target_date: Target date for analysis
+    
+    Returns:
+        int: Number of tools analyzed
+    """
+    print(f"  🔧 Generating tool usage analysis for {department_name}...")
+    
+    try:
+        # Build SQL query for tool usage analysis
+        query = f"""
+        WITH total_conversations AS (
+            -- Total conversations (for percentage denominators)
+            SELECT COUNT(DISTINCT CONVERSATION_ID) as TOTAL_CONVS
+            FROM CONVERSATION_CATEGORIES
+            WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+        ),
+        all_tool_calls AS (
+            -- All tool call attempts per tool
+            SELECT 
+                TOOL_NAME,
+                COUNT(*) as TOTAL_ATTEMPTS,
+                COUNT(DISTINCT CONVERSATION_ID) as TOTAL_CONVS_WITH_TOOL
+            FROM CONVERSATION_TOOL_CALLS
+            WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+            GROUP BY TOOL_NAME
+        ),
+        successful_tool_calls AS (
+            -- Successful tool calls (not stopped by guardrails)
+            SELECT 
+                ct.TOOL_NAME,
+                ct.CONVERSATION_ID,
+                ct.TOOL_CALL_ID
+            FROM CONVERSATION_TOOL_CALLS ct
+            LEFT JOIN GUARDRAIL_STOPPED_TOOLS gst
+                ON ct.TOOL_CALL_ID = gst.TOOL_CALL_ID
+                AND ct.DATE = gst.DATE
+                AND ct.DEPARTMENT = gst.DEPARTMENT
+            WHERE ct.DATE = '{target_date}' 
+              AND ct.DEPARTMENT = '{department_name}'
+              AND gst.TOOL_CALL_ID IS NULL
+        ),
+        successful_executions AS (
+            -- Count successful executions per tool
+            SELECT 
+                TOOL_NAME,
+                COUNT(*) as ACTUAL_EXECUTIONS
+            FROM successful_tool_calls
+            GROUP BY TOOL_NAME
+        ),
+        tool_calls_per_conversation AS (
+            -- Count how many times each tool was called per conversation (successful only)
+            SELECT 
+                TOOL_NAME,
+                CONVERSATION_ID,
+                COUNT(*) as CALL_COUNT
+            FROM successful_tool_calls
+            GROUP BY TOOL_NAME, CONVERSATION_ID
+        ),
+        frequency_buckets AS (
+            -- Categorize conversations into frequency buckets per tool
+            SELECT 
+                TOOL_NAME,
+                COUNT(DISTINCT CASE WHEN CALL_COUNT = 1 THEN CONVERSATION_ID END) as CALLED_ONCE_COUNT,
+                COUNT(DISTINCT CASE WHEN CALL_COUNT = 2 THEN CONVERSATION_ID END) as CALLED_TWICE_COUNT,
+                COUNT(DISTINCT CASE WHEN CALL_COUNT >= 3 THEN CONVERSATION_ID END) as CALLED_THRICE_PLUS_COUNT
+            FROM tool_calls_per_conversation
+            GROUP BY TOOL_NAME
+        )
+        SELECT 
+            atc.TOOL_NAME,
+            
+            -- Actual Executions (successful, not blocked)
+            COALESCE(se.ACTUAL_EXECUTIONS, 0) as ACTUAL_EXECUTIONS_COUNT,
+            ROUND((COALESCE(se.ACTUAL_EXECUTIONS, 0) * 100.0 / NULLIF(tc.TOTAL_CONVS, 0)), 2) as ACTUAL_EXECUTIONS_PCT,
+            
+            -- Called Once in Chat
+            COALESCE(fb.CALLED_ONCE_COUNT, 0) as CALLED_ONCE_COUNT,
+            ROUND((COALESCE(fb.CALLED_ONCE_COUNT, 0) * 100.0 / NULLIF(tc.TOTAL_CONVS, 0)), 2) as CALLED_ONCE_PCT,
+            
+            -- Called Twice in Chat
+            COALESCE(fb.CALLED_TWICE_COUNT, 0) as CALLED_TWICE_COUNT,
+            ROUND((COALESCE(fb.CALLED_TWICE_COUNT, 0) * 100.0 / NULLIF(tc.TOTAL_CONVS, 0)), 2) as CALLED_TWICE_PCT,
+            
+            -- Called Thrice+ in Chat
+            COALESCE(fb.CALLED_THRICE_PLUS_COUNT, 0) as CALLED_THRICE_PLUS_COUNT,
+            ROUND((COALESCE(fb.CALLED_THRICE_PLUS_COUNT, 0) * 100.0 / NULLIF(tc.TOTAL_CONVS, 0)), 2) as CALLED_THRICE_PLUS_PCT,
+            
+            -- Reference columns
+            atc.TOTAL_ATTEMPTS,
+            tc.TOTAL_CONVS as TOTAL_CONVERSATIONS
+            
+        FROM all_tool_calls atc
+        CROSS JOIN total_conversations tc
+        LEFT JOIN successful_executions se ON atc.TOOL_NAME = se.TOOL_NAME
+        LEFT JOIN frequency_buckets fb ON atc.TOOL_NAME = fb.TOOL_NAME
+        ORDER BY COALESCE(se.ACTUAL_EXECUTIONS, 0) DESC
+        """
+        
+        # Execute query
+        print(f"    🔍 Executing tool usage analysis query...")
+        analysis_df = session.sql(query).to_pandas()
+        
+        if analysis_df.empty:
+            print(f"    ℹ️  No tool usage data generated for {department_name}")
+            return 0
+        
+        print(f"    ✅ Generated analysis for {len(analysis_df)} tools")
+        
+        # Define columns for the table
+        columns = [
+            'TOOL_NAME',
+            'ACTUAL_EXECUTIONS_COUNT',
+            'ACTUAL_EXECUTIONS_PCT',
+            'CALLED_ONCE_COUNT',
+            'CALLED_ONCE_PCT',
+            'CALLED_TWICE_COUNT',
+            'CALLED_TWICE_PCT',
+            'CALLED_THRICE_PLUS_COUNT',
+            'CALLED_THRICE_PLUS_PCT',
+            'TOTAL_ATTEMPTS',
+            'TOTAL_CONVERSATIONS'
+        ]
+        
+        try:
+            # Save using insert_raw_data_with_cleanup
+            insert_raw_data_with_cleanup(
+                session=session,
+                table_name="TOOL_USAGE_ANALYSIS",
+                department=department_name,
+                target_date=target_date,
+                dataframe=analysis_df[columns],
+                columns=columns
+            )
+            print(f"    💾 Saved tool usage analysis to TOOL_USAGE_ANALYSIS table")
+        except Exception as save_error:
+            print(f"    ⚠️  Failed to save tool usage analysis: {str(save_error)}")
+        
+        return len(analysis_df)
+    
+    except Exception as e:
+        print(f"    ⚠️  Error generating tool usage analysis: {str(e)}")
+        return 0
+
 
 def analyze_bot_handled_conversations_single_department(session, df, department_name, departments_config, target_date):
     """
@@ -6487,6 +6648,12 @@ def analyze_bot_handled_conversations_all_departments(session: snowpark.Session,
             generate_guardrail_summary_by_category(
                 session, department_name, target_date
             )
+
+            # Generate tool usage analysis (for CC_Resolvers)
+            if department_name == 'CC_Resolvers':
+                generate_tool_usage_analysis(
+                    session, department_name, target_date
+                )
 
             # Sales Bot and AT bots: tool-name-based guardrail analytics
             # These departments do not use conversation categories, so guardrail
@@ -7722,6 +7889,7 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'Excluded_Hi_Bye_Chats':        excluded_hi_bye,
             'Excluded_Wrong_Date_Chats':    excluded_wrong_date,
             'Total_Excluded_Chats':         total_excluded,
+            'CONSUMER_ONLY_CHATS_COUNT':    _fs.get('consumer_only_chats_count', 0),
             'Bot_Handled_Count': bot_data.get('bot_handled_count', 0),
             'Bot_Handled_Percentage': round(bot_data.get('bot_handled_percentage', 0), 2),
             # CC_Resolvers Specific Metrics
@@ -7958,6 +8126,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'Excluded_Hi_Bye_Chats': 'NUMBER',
                 'Excluded_Wrong_Date_Chats': 'NUMBER',
                 'Total_Excluded_Chats': 'NUMBER',
+                'CONSUMER_ONLY_CHATS_COUNT': 'NUMBER',
                 'Bot_Handled_Count': 'NUMBER',
                 'Bot_Handled_Percentage': 'FLOAT',
                 'Chats_With_1_Plus_Agent_Messages': 'NUMBER',
@@ -8157,6 +8326,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'Excluded_Hi_Bye_Chats':         'NUMBER',
                 'Excluded_Wrong_Date_Chats':     'NUMBER',
                 'Total_Excluded_Chats':          'NUMBER',
+                'CONSUMER_ONLY_CHATS_COUNT':     'NUMBER',
                 'AVG_BOT_MSGS_BEFORE_TRANSFER':  'FLOAT',
                 'TRANSFERRED_CONVERSATION_COUNT':'NUMBER',
                 'MCD_MV_TRANSFER_COUNT':         'NUMBER',
@@ -11164,6 +11334,7 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'Excluded_Hi_Bye_Chats':        excluded_hi_bye,
             'Excluded_Wrong_Date_Chats':    excluded_wrong_date,
             'Total_Excluded_Chats':         total_excluded,
+            'CONSUMER_ONLY_CHATS_COUNT':    _fs.get('consumer_only_chats_count', 0),
             'Bot_Handled_Count': bot_data.get('bot_handled_count', 0),
             'Bot_Handled_Percentage': round(bot_data.get('bot_handled_percentage', 0), 2),
             
