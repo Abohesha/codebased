@@ -908,6 +908,97 @@ def analyze_conversation_metadata(df, conversation_ids):
     return metadata
 
 
+def get_mv_bot_boomerang_conv_ids(session, conversation_ids, target_date):
+    """
+    Identify MV_Resolvers "boomerang" conversations to be excluded from
+    DataFrame-based analyses (transfers / intervention / quality breakdown).
+
+    A boomerang conversation matches this ordered pattern in
+    BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS:
+        1. GPT_MV_RESOLVERS was involved (via any transfer source/target).
+        2. A LATER transfer leaves GPT_MV_RESOLVERS for a non-MV_Resolvers skill
+           (i.e., the chat was handed to another department).
+        3. An EVEN LATER transfer hands the chat back to MV_RESOLVERS_SENIORS
+           or MV_CALLERS.
+
+    These chats are kept in RESOLVERS_CHATS_BREAKDOWN and the seniors/callers
+    metrics (since they're computed via direct SQL and do not use the filtered
+    DataFrame), but are excluded from everything that flows through the
+    in-memory DataFrame.
+
+    Args:
+        session: Snowflake session
+        conversation_ids: Iterable of conversation IDs currently in scope.
+        target_date: Target date string ('YYYY-MM-DD'); the CC_TRANSFERS scan
+                     is bounded to a small window around the chat lifecycle.
+
+    Returns:
+        set: Conversation IDs to exclude.
+    """
+    if not conversation_ids:
+        return set()
+
+    # Skills that count as "still inside MV_Resolvers" — i.e. NOT another department
+    mv_internal_skills = [
+        'GPT_MV_RESOLVERS',
+        'MV_RESOLVERS_SENIORS',
+        'MV_CALLERS',
+        'Pre_R_Visa_Retention',
+        'GPT_RESOLVERS_BOT',
+        'gpt_delighters',
+    ]
+    mv_internal_skills_str = "', '".join(mv_internal_skills)
+
+    try:
+        date_obj = datetime.strptime(target_date, '%Y-%m-%d')
+        window_start = (date_obj - timedelta(days=1)).strftime('%Y-%m-%d')
+        window_end = (date_obj + timedelta(days=2)).strftime('%Y-%m-%d')
+    except Exception:
+        window_start = target_date
+        window_end = target_date
+
+    conv_ids_str = "', '".join([str(cid) for cid in conversation_ids])
+
+    query = f"""
+    WITH transfers AS (
+        SELECT
+            conversation_id,
+            transfer_time,
+            source_skill_name,
+            target_skill_name
+        FROM BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS
+        WHERE conversation_id IN ('{conv_ids_str}')
+          AND DATE(transfer_time) BETWEEN '{window_start}' AND '{window_end}'
+    ),
+    out_to_other AS (
+        -- Step 2: chat leaves GPT_MV_RESOLVERS to a non-MV skill
+        SELECT conversation_id, MIN(transfer_time) AS out_time
+        FROM transfers
+        WHERE source_skill_name = 'GPT_MV_RESOLVERS'
+          AND (
+              target_skill_name IS NULL
+              OR target_skill_name NOT IN ('{mv_internal_skills_str}')
+          )
+        GROUP BY conversation_id
+    )
+    SELECT DISTINCT t.conversation_id
+    FROM out_to_other o
+    JOIN transfers t
+      ON t.conversation_id = o.conversation_id
+     AND t.transfer_time > o.out_time
+     AND t.target_skill_name IN ('MV_RESOLVERS_SENIORS', 'MV_CALLERS')
+    """
+
+    try:
+        result_df = session.sql(query).to_pandas()
+        if result_df.empty:
+            return set()
+        return set(result_df['CONVERSATION_ID'].values)
+    except Exception as e:
+        print(f"    ⚠️  Error detecting MV_Resolvers boomerang conversations: {e}")
+        return set()
+
+
 def track_removed_conversations(session, conversation_ids, department_name, target_date, removal_stage, removal_reason, conversation_metadata, removal_details=None):
     """
     Track conversations removed at each filtration stage.
@@ -918,7 +1009,7 @@ def track_removed_conversations(session, conversation_ids, department_name, targ
         conversation_ids: List of conversation IDs removed
         department_name: Department name
         target_date: Target date
-        removal_stage: Stage where removed (engagement, null_execution_id, bot_skill, hi_bye, date)
+        removal_stage: Stage where removed (engagement, null_execution_id, bot_skill, hi_bye, mv_bot_boomerang, date)
         removal_reason: Detailed reason for removal
         conversation_metadata: Dict of metadata for each conversation
         removal_details: Optional additional details
@@ -1317,7 +1408,58 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     
     # Merge hi-bye stats into filtering_stats
     filtering_stats.update(hi_bye_stats)
-    
+
+    # ============================================================
+    # MV_Resolvers boomerang filter (NEW STAGE)
+    # ------------------------------------------------------------
+    # Remove chats where GPT_MV_RESOLVERS was involved, the chat was
+    # transferred to another department, and that department then sent it
+    # back to MV_RESOLVERS_SENIORS or MV_CALLERS. These chats stay in the
+    # Resolvers chats breakdown and Chatbot Alignment metrics (those use
+    # direct SQL, not the filtered DataFrame) but are excluded from all
+    # DataFrame-based analyses (transfers, intervention, quality metrics
+    # breakdown).
+    # ============================================================
+    boomerang_excluded_count = 0
+    if department_name == 'MV_Resolvers' and not filtered_df.empty:
+        print(f"  🔁 Checking for MV_Resolvers boomerang chats (GPT_MV_RESOLVERS → other dept → back to seniors/callers)...")
+        in_scope_conv_ids = set(filtered_df['CONVERSATION_ID'].unique())
+        boomerang_conv_ids = get_mv_bot_boomerang_conv_ids(
+            session, in_scope_conv_ids, target_date
+        )
+        boomerang_conv_ids = boomerang_conv_ids.intersection(in_scope_conv_ids)
+
+        if boomerang_conv_ids:
+            temp_df = df[df['CONVERSATION_ID'].isin(boomerang_conv_ids)]
+            boomerang_metadata = analyze_conversation_metadata(
+                temp_df, list(boomerang_conv_ids)
+            )
+
+            removed_records = track_removed_conversations(
+                session=session,
+                conversation_ids=list(boomerang_conv_ids),
+                department_name=department_name,
+                target_date=target_date,
+                removal_stage='mv_bot_boomerang',
+                removal_reason='MV_BOT_BOOMERANG',
+                conversation_metadata={
+                    cid: boomerang_metadata.get(cid, {}) for cid in boomerang_conv_ids
+                },
+                removal_details=(
+                    f"GPT_MV_RESOLVERS → other department → returned to MV_RESOLVERS_SENIORS/MV_CALLERS: "
+                    f"{len(boomerang_conv_ids)}"
+                )
+            )
+            removed_conversations_data.extend(removed_records)
+
+            filtered_df = filtered_df[~filtered_df['CONVERSATION_ID'].isin(boomerang_conv_ids)]
+            boomerang_excluded_count = len(boomerang_conv_ids)
+            print(f"    🚫 Excluded {boomerang_excluded_count} MV bot boomerang chats")
+        else:
+            print(f"    ✅ No MV bot boomerang chats found")
+
+    filtering_stats['mv_bot_boomerang_excluded'] = boomerang_excluded_count
+
     return filtered_df, filtering_stats, bot_routed_no_response, removed_conversations_data
 
 
