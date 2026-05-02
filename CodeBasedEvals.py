@@ -768,6 +768,13 @@ def get_snowflake_departments_config():
             'table_name': 'SILVER.CHAT_EVALS.CLEANERS_CHATS',
             'skill_filter': 'GPT_AE_SALES',
             'bot_filter': 'bot'
+        },
+        'Travel_Assist': {
+            'bot_skills': ['GPT_MV_RESOLVERS_TA'],
+            'agent_skills': ['Travel_Assist_Clients','Travel_Assist_Maids'],
+            'table_name': 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS',
+            'skill_filter': 'GPT_MV_RESOLVERS_TA',
+            'bot_filter': 'bot'
         }
     }
 
@@ -847,6 +854,103 @@ def preprocess_data_snowflake_phase1(df, department_name, target_date=None):
     return df
 
 
+def analyze_conversation_metadata(df, conversation_ids):
+    """
+    Extract metadata for conversations to track why they were removed.
+    
+    Args:
+        df: DataFrame with all conversation data
+        conversation_ids: List of conversation IDs to analyze
+    
+    Returns:
+        dict: {conversation_id: {metadata_dict}}
+    """
+    metadata = {}
+    
+    for conv_id in conversation_ids:
+        conv_df = df[df['CONVERSATION_ID'] == conv_id]
+        
+        if conv_df.empty:
+            metadata[conv_id] = {
+                'THROUGH_SKILL': None,
+                'FIRST_MESSAGE_TIME': None,
+                'LAST_MESSAGE_TIME': None,
+                'MESSAGE_COUNT': 0,
+                'CONSUMER_MESSAGE_COUNT': 0,
+                'AGENT_MESSAGE_COUNT': 0,
+                'BOT_MESSAGE_COUNT': 0,
+                'TARGET_SKILLS_USED': None
+            }
+            continue
+        
+        # Get first row for THROUGH_SKILL
+        first_row = conv_df.iloc[0]
+        
+        # Count messages by sender
+        consumer_count = len(conv_df[conv_df['SENT_BY'].str.lower() == 'consumer'])
+        agent_count = len(conv_df[conv_df['SENT_BY'].str.lower() == 'agent'])
+        bot_count = len(conv_df[conv_df['SENT_BY'].str.lower() == 'bot'])
+        
+        # Get unique target skills used
+        target_skills = ', '.join(conv_df['TARGET_SKILL_PER_MESSAGE'].dropna().unique()[:5])  # Limit to 5 skills
+        
+        metadata[conv_id] = {
+            'THROUGH_SKILL': first_row.get('THROUGH_SKILL', None),
+            'FIRST_MESSAGE_TIME': conv_df['MESSAGE_SENT_TIME'].min() if 'MESSAGE_SENT_TIME' in conv_df.columns else None,
+            'LAST_MESSAGE_TIME': conv_df['MESSAGE_SENT_TIME'].max() if 'MESSAGE_SENT_TIME' in conv_df.columns else None,
+            'MESSAGE_COUNT': len(conv_df),
+            'CONSUMER_MESSAGE_COUNT': consumer_count,
+            'AGENT_MESSAGE_COUNT': agent_count,
+            'BOT_MESSAGE_COUNT': bot_count,
+            'TARGET_SKILLS_USED': target_skills if target_skills else None
+        }
+    
+    return metadata
+
+
+def track_removed_conversations(session, conversation_ids, department_name, target_date, removal_stage, removal_reason, conversation_metadata, removal_details=None):
+    """
+    Track conversations removed at each filtration stage.
+    Appends to a list that will be saved later.
+    
+    Args:
+        session: Snowflake session
+        conversation_ids: List of conversation IDs removed
+        department_name: Department name
+        target_date: Target date
+        removal_stage: Stage where removed (engagement, null_execution_id, bot_skill, hi_bye, date)
+        removal_reason: Detailed reason for removal
+        conversation_metadata: Dict of metadata for each conversation
+        removal_details: Optional additional details
+    
+    Returns:
+        list: List of removal records
+    """
+    removal_records = []
+    
+    for conv_id in conversation_ids:
+        metadata = conversation_metadata.get(conv_id, {})
+        
+        record = {
+            'CONVERSATION_ID': conv_id,
+            'REMOVAL_STAGE': removal_stage,
+            'REMOVAL_REASON': removal_reason,
+            'THROUGH_SKILL': metadata.get('THROUGH_SKILL'),
+            'FIRST_MESSAGE_TIME': metadata.get('FIRST_MESSAGE_TIME'),
+            'LAST_MESSAGE_TIME': metadata.get('LAST_MESSAGE_TIME'),
+            'MESSAGE_COUNT': metadata.get('MESSAGE_COUNT', 0),
+            'CONSUMER_MESSAGE_COUNT': metadata.get('CONSUMER_MESSAGE_COUNT', 0),
+            'AGENT_MESSAGE_COUNT': metadata.get('AGENT_MESSAGE_COUNT', 0),
+            'BOT_MESSAGE_COUNT': metadata.get('BOT_MESSAGE_COUNT', 0),
+            'TARGET_SKILLS_USED': metadata.get('TARGET_SKILLS_USED'),
+            'REMOVAL_DETAILS': removal_details
+        }
+        
+        removal_records.append(record)
+    
+    return removal_records
+
+
 def filter_conversations_snowflake_engagement(session, df, department_name, departments_config, target_date=None, apply_filter_5=True):
     """
     Apply engagement filtering for Snowflake data.
@@ -865,9 +969,12 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
         apply_filter_5: Whether to apply filter 5 (bot skill filter)
     
     Returns:
-        Tuple: (filtered_df, filtering_stats, bot_routed_no_response)
+        Tuple: (filtered_df, filtering_stats, bot_routed_no_response, removed_conversations_data)
     """
     print(f"  🔍 Applying engagement filtering for {department_name}...")
+    
+    # Initialize list to track all removed conversations
+    removed_conversations_data = []
     
     if department_name not in departments_config:
         raise ValueError(f"Department '{department_name}' not configured")
@@ -907,6 +1014,13 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     all_conversations = set(df['CONVERSATION_ID'].unique())
     print(f"    📊 Total conversations: {len(all_conversations)}")
     
+    # Prepare conversation metadata for tracking
+    all_conversations_list = list(all_conversations)
+    all_metadata = analyze_conversation_metadata(df, all_conversations_list)
+    
+    # Track all removed conversations to avoid duplicates
+    already_removed_conversations = set()
+    
     # Filter 1: Conversations with consumer normal messages
     consumer_normal_messages = df[
         (df['MESSAGE_TYPE'].str.lower() == 'normal message') &
@@ -914,6 +1028,22 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     ]
     conversations_with_consumer = set(consumer_normal_messages['CONVERSATION_ID'].unique())
     print(f"    👤 Conversations with consumer messages: {len(conversations_with_consumer)}")
+    
+    # Track conversations removed due to no consumer messages
+    conversations_no_consumer = all_conversations - conversations_with_consumer
+    if conversations_no_consumer:
+        removed_records = track_removed_conversations(
+            session=session,
+            conversation_ids=list(conversations_no_consumer),
+            department_name=department_name,
+            target_date=target_date,
+            removal_stage='engagement',
+            removal_reason='NO_CONSUMER_MESSAGES',
+            conversation_metadata={conv_id: all_metadata.get(conv_id, {}) for conv_id in conversations_no_consumer},
+            removal_details=f"Conversations without consumer normal messages: {len(conversations_no_consumer)}"
+        )
+        removed_conversations_data.extend(removed_records)
+        already_removed_conversations.update(conversations_no_consumer)
     
     # Filter 2: Conversations with agent normal messages from department
     agent_normal_messages = df[
@@ -968,14 +1098,111 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     # Combine agent, bot, and tool/tool response conversations
     conversations_with_service = conversations_with_agents.union(conversations_with_bots).union(conversations_with_tools)
     print(f"    🏢 Conversations with department service: {len(conversations_with_service)}")
+    
+    # Track N8N_TEST conversations (exclude already removed)
+    n8n_test_conversations = set()
+    n8n_test_conversations.update(df[df['TARGET_SKILL_PER_MESSAGE'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
+    n8n_test_conversations.update(df[df['THROUGH_SKILL'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
+    
+    # Exclude conversations already removed
+    n8n_test_conversations = n8n_test_conversations - already_removed_conversations
+    
+    if n8n_test_conversations:
+        removed_records = track_removed_conversations(
+            session=session,
+            conversation_ids=list(n8n_test_conversations),
+            department_name=department_name,
+            target_date=target_date,
+            removal_stage='engagement',
+            removal_reason='N8N_TEST_CONVERSATION',
+            conversation_metadata={conv_id: all_metadata.get(conv_id, {}) for conv_id in n8n_test_conversations},
+            removal_details=f"Conversations containing N8N_TEST in TARGET_SKILL_PER_MESSAGE or THROUGH_SKILL: {len(n8n_test_conversations)}"
+        )
+        removed_conversations_data.extend(removed_records)
+        already_removed_conversations.update(n8n_test_conversations)
+    
     # Filter 4: Engagement filter - Conversations that meet both criteria
     engagement_valid_conversations = conversations_with_consumer.intersection(conversations_with_service)
     print(f"    ✅ Engagement-valid conversations: {len(engagement_valid_conversations)}")
+    
+    # Track conversations with no department service (exclude already removed)
+    conversations_no_service = (conversations_with_consumer - conversations_with_service) - already_removed_conversations
+    if conversations_no_service:
+        removed_records = track_removed_conversations(
+            session=session,
+            conversation_ids=list(conversations_no_service),
+            department_name=department_name,
+            target_date=target_date,
+            removal_stage='engagement',
+            removal_reason='NO_DEPARTMENT_SERVICE',
+            conversation_metadata={conv_id: all_metadata.get(conv_id, {}) for conv_id in conversations_no_service},
+            removal_details=f"Conversations without agent or bot messages from department skills: {len(conversations_no_service)}"
+        )
+        removed_conversations_data.extend(removed_records)
+        already_removed_conversations.update(conversations_no_service)
     
     # Remove N8N_TEST from engagement_valid_conversations using both TARGET_SKILL_PER_MESSAGE and THROUGH_SKILL
     engagement_valid_conversations = engagement_valid_conversations - set(df[df['TARGET_SKILL_PER_MESSAGE'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
     engagement_valid_conversations = engagement_valid_conversations - set(df[df['THROUGH_SKILL'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
     print(f"    ✅ Engagement-valid conversations after removing N8N_TEST: {len(engagement_valid_conversations)}")
+    
+    # Filter: Remove conversations where ALL department messages have NULL EXECUTION_ID (MV_Resolvers only)
+    # EXCEPTION: Keep conversations with guardrail interactions
+    conversations_with_all_null_execution_id = set()
+    
+    if department_name == 'MV_Resolvers':
+        print(f"  🔍 Checking for conversations with all NULL execution IDs in department messages (MV_Resolvers only)...")
+        
+        # Get guardrail conversation IDs for exception handling
+        guardrail_conv_ids = get_guardrail_conversation_ids(session, department_name, target_date)
+        print(f"    🛡️  Found {len(guardrail_conv_ids)} conversations with guardrail interactions (will be kept as exceptions)")
+        
+        # Combine bot_skills and agent_skills to get all department skills
+        department_skills = set(bot_skills + agent_skills)
+        
+        # Check if EXECUTION_ID column exists
+        if 'EXECUTION_ID' in df.columns:
+            for conv_id in engagement_valid_conversations:
+                # Get all messages for this conversation that are from department skills
+                conv_messages = df[
+                    (df['CONVERSATION_ID'] == conv_id) &
+                    (df['TARGET_SKILL_PER_MESSAGE'].isin(department_skills))
+                ]
+                
+                # If there are department messages
+                if len(conv_messages) > 0:
+                    # Check if ALL department messages have NULL EXECUTION_ID
+                    # Check for both None and NaN values
+                    null_execution_ids = conv_messages['EXECUTION_ID'].isna().sum()
+                    
+                    if null_execution_ids == len(conv_messages):
+                        # All department messages have NULL EXECUTION_ID
+                        # Check exception: if conversation has guardrail, keep it
+                        if conv_id not in guardrail_conv_ids:
+                            conversations_with_all_null_execution_id.add(conv_id)
+                        # else: conversation has guardrail - exception applies, keep it
+            
+            print(f"    ⚠️  Conversations with all NULL execution IDs (excluding guardrail exceptions): {len(conversations_with_all_null_execution_id)}")
+            
+            # Track conversations removed due to NULL execution IDs
+            if conversations_with_all_null_execution_id:
+                removed_records = track_removed_conversations(
+                    session=session,
+                    conversation_ids=list(conversations_with_all_null_execution_id),
+                    department_name=department_name,
+                    target_date=target_date,
+                    removal_stage='null_execution_id',
+                    removal_reason='ALL_NULL_EXECUTION_ID',
+                    conversation_metadata={conv_id: all_metadata.get(conv_id, {}) for conv_id in conversations_with_all_null_execution_id},
+                    removal_details=f"All department messages have NULL EXECUTION_ID (guardrail exceptions excluded): {len(conversations_with_all_null_execution_id)}"
+                )
+                removed_conversations_data.extend(removed_records)
+            
+            # Remove these conversations from engagement_valid_conversations
+            engagement_valid_conversations = engagement_valid_conversations - conversations_with_all_null_execution_id
+            print(f"    ✅ Engagement-valid conversations after removing NULL execution IDs: {len(engagement_valid_conversations)}")
+        else:
+            print(f"    ⚠️  EXECUTION_ID column not found - skipping NULL execution ID filter")
     
     if apply_filter_5:
         # Filter 5: Bot skill filter - Check THROUGH_SKILL contains any bot_skills
@@ -1003,9 +1230,25 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
         
         print(f"    🤖 Conversations with bot skills: {len(conversations_with_bot_skills)}")
         
+        # Track conversations that failed bot skill filter
+        conversations_failed_bot_skill = engagement_valid_conversations - conversations_with_bot_skills
+        if conversations_failed_bot_skill:
+            removed_records = track_removed_conversations(
+                session=session,
+                conversation_ids=list(conversations_failed_bot_skill),
+                department_name=department_name,
+                target_date=target_date,
+                removal_stage='bot_skill',
+                removal_reason='FAILED_BOT_SKILL_FILTER',
+                conversation_metadata={conv_id: all_metadata.get(conv_id, {}) for conv_id in conversations_failed_bot_skill},
+                removal_details=f"Conversations where THROUGH_SKILL does not contain required bot skills: {len(conversations_failed_bot_skill)}"
+            )
+            removed_conversations_data.extend(removed_records)
+        
         # Filter the dataframe to only include conversations with bot skills
         filtered_df = df[df['CONVERSATION_ID'].isin(conversations_with_bot_skills)]
     else:
+        conversations_with_bot_skills = engagement_valid_conversations  # For stats consistency
         filtered_df = df[df['CONVERSATION_ID'].isin(engagement_valid_conversations)]
     
     # BOT-ROUTED NO RESPONSE LOGIC DISABLED FOR ALL DEPARTMENTS
@@ -1016,6 +1259,13 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     
     
     print(f"    ⚠️  Bot-routed no-response logic: DISABLED for all departments")
+
+    # Exclude N8N_TEST conversations from this count to avoid false positives
+    n8n_conv_ids = set(df[df['TARGET_SKILL_PER_MESSAGE'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
+    n8n_conv_ids.update(df[df['THROUGH_SKILL'].str.contains('N8N_TEST', na=False, case=False)]['CONVERSATION_ID'].unique())
+    consumer_only_chats_count = len(
+        (conversations_with_consumer - conversations_with_service) - n8n_conv_ids
+    )
     
     # Calculate filtering statistics
     filtering_stats = {
@@ -1025,6 +1275,7 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
         'conversations_with_bots': len(conversations_with_bots),
         'conversations_with_tools': len(conversations_with_tools),
         'conversations_with_service': len(conversations_with_service),
+        'conversations_with_all_null_execution_id': len(conversations_with_all_null_execution_id),
         'engagement_valid_conversations': len(engagement_valid_conversations),
         'conversations_with_bot_skills': len(conversations_with_bot_skills) if apply_filter_5 else 0,
         'bot_routed_no_response_conversations': len(bot_routed_no_response),
@@ -1038,14 +1289,36 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
    
     
     # Apply hi-bye filter as final filter on the engagement filtered_df
+    conversations_before_hi_bye = set(filtered_df['CONVERSATION_ID'].unique())
     filtered_df, hi_bye_stats = filter_conversations_snowflake_hi_bye(
         session, filtered_df, department_name, target_date
     )
+    conversations_after_hi_bye = set(filtered_df['CONVERSATION_ID'].unique())
+    
+    # Track conversations removed by hi-bye filter
+    conversations_removed_by_hi_bye = conversations_before_hi_bye - conversations_after_hi_bye
+    if conversations_removed_by_hi_bye:
+        # Prepare metadata for removed conversations - use original df before hi-bye filter
+        temp_df = df[df['CONVERSATION_ID'].isin(conversations_removed_by_hi_bye)]
+        all_conversations_list = list(conversations_removed_by_hi_bye)
+        all_metadata = analyze_conversation_metadata(temp_df, all_conversations_list)
+        
+        removed_records = track_removed_conversations(
+            session=session,
+            conversation_ids=list(conversations_removed_by_hi_bye),
+            department_name=department_name,
+            target_date=target_date,
+            removal_stage='hi_bye',
+            removal_reason='HI_BYE_CONVERSATION',
+            conversation_metadata={conv_id: all_metadata.get(conv_id, {}) for conv_id in conversations_removed_by_hi_bye},
+            removal_details=f"Conversations identified as hi-bye from HI_BYE_CHATS table: {len(conversations_removed_by_hi_bye)}"
+        )
+        removed_conversations_data.extend(removed_records)
     
     # Merge hi-bye stats into filtering_stats
     filtering_stats.update(hi_bye_stats)
     
-    return filtered_df, filtering_stats, bot_routed_no_response
+    return filtered_df, filtering_stats, bot_routed_no_response, removed_conversations_data
 
 
 def filter_conversations_snowflake_date(df, department_name, target_date=None):
@@ -1139,8 +1412,8 @@ def filter_conversations_snowflake_combined(session, df, department_name, target
     source_conversations = len(df['CONVERSATION_ID'].unique())
     
     # Step 1: Apply engagement filtering (includes hi-bye filtering at the end)
-    engagement_filtered_df, engagement_stats, bot_routed_no_response = filter_conversations_snowflake_engagement(
-        session, df, department_name, departments_config, target_date, True
+    engagement_filtered_df, engagement_stats, bot_routed_no_response, removed_conversations_data = filter_conversations_snowflake_engagement(
+        session, df, department_name, departments_config, target_date, apply_filter_5
     )
     
     if engagement_filtered_df.empty:
@@ -1151,6 +1424,25 @@ def filter_conversations_snowflake_combined(session, df, department_name, target
     final_filtered_df, date_stats = filter_conversations_snowflake_date(
         engagement_filtered_df, department_name, target_date
     )
+    
+    # Track conversations removed by date filter
+    conversations_removed_by_date = set(engagement_filtered_df['CONVERSATION_ID'].unique()) - set(final_filtered_df['CONVERSATION_ID'].unique())
+    if conversations_removed_by_date:
+        # Prepare metadata for removed conversations
+        all_conversations_list = list(conversations_removed_by_date)
+        all_metadata = analyze_conversation_metadata(engagement_filtered_df, all_conversations_list)
+        
+        removed_records = track_removed_conversations(
+            session=session,
+            conversation_ids=list(conversations_removed_by_date),
+            department_name=department_name,
+            target_date=target_date,
+            removal_stage='date',
+            removal_reason='WRONG_DATE',
+            conversation_metadata={conv_id: all_metadata.get(conv_id, {}) for conv_id in conversations_removed_by_date},
+            removal_details=f"Conversations with all messages from day 1 (no day 2 messages): {len(conversations_removed_by_date)}"
+        )
+        removed_conversations_data.extend(removed_records)
     
     # Combine statistics
     combined_stats = {
@@ -1171,6 +1463,51 @@ def filter_conversations_snowflake_combined(session, df, department_name, target
     
     print(f"    🎯 FINAL RESULT: {combined_stats['final_valid_conversations']} conversations")
     print(f"    📈 Overall retention: {combined_stats['overall_retention_rate']:.1f}%")
+    
+    # Save removed conversations to table
+    if removed_conversations_data:
+        try:
+            print(f"    💾 Saving {len(removed_conversations_data)} removed conversation records to CONVERSATIONS_REMOVED_BY_STAGE...")
+            removed_df = pd.DataFrame(removed_conversations_data)
+            
+            # Check for duplicates
+            duplicate_convs = removed_df[removed_df.duplicated('CONVERSATION_ID', keep=False)]['CONVERSATION_ID'].unique()
+            if len(duplicate_convs) > 0:
+                print(f"    ⚠️  WARNING: {len(duplicate_convs)} conversations tracked multiple times!")
+                print(f"    📋 Duplicate breakdown:")
+                for conv_id in list(duplicate_convs)[:10]:  # Show first 10
+                    conv_records = removed_df[removed_df['CONVERSATION_ID'] == conv_id]
+                    reasons = ', '.join(conv_records['REMOVAL_REASON'].tolist())
+                    print(f"       - {conv_id}: {reasons}")
+                if len(duplicate_convs) > 10:
+                    print(f"       ... and {len(duplicate_convs) - 10} more")
+                
+                # Remove duplicates - keep first occurrence only
+                print(f"    🧹 Removing duplicates (keeping first removal reason for each conversation)...")
+                removed_df = removed_df.drop_duplicates('CONVERSATION_ID', keep='first')
+                print(f"    ✅ After deduplication: {len(removed_df)} unique conversations")
+            
+            # Define columns for the table
+            columns = [
+                'CONVERSATION_ID', 'REMOVAL_STAGE', 'REMOVAL_REASON', 'THROUGH_SKILL',
+                'FIRST_MESSAGE_TIME', 'LAST_MESSAGE_TIME', 'MESSAGE_COUNT',
+                'CONSUMER_MESSAGE_COUNT', 'AGENT_MESSAGE_COUNT', 'BOT_MESSAGE_COUNT',
+                'TARGET_SKILLS_USED', 'REMOVAL_DETAILS'
+            ]
+            
+            insert_raw_data_with_cleanup(
+                session=session,
+                table_name="CONVERSATIONS_REMOVED_BY_STAGE",
+                department=department_name,
+                target_date=target_date,
+                dataframe=removed_df[columns],
+                columns=columns
+            )
+            print(f"    ✅ Saved {len(removed_df)} removed conversation records")
+        except Exception as e:
+            print(f"    ⚠️  Failed to save removed conversations: {str(e)}")
+    else:
+        print(f"    ℹ️  No removed conversations to save")
     
     return final_filtered_df, combined_stats, bot_routed_no_response
 
@@ -1544,7 +1881,7 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     system_private_messages = conversation_df[
         (conversation_df['SENT_BY'].str.upper() == 'SYSTEM') & 
         (conversation_df['MESSAGE_TYPE'].str.upper() == 'PRIVATE MESSAGE')
-        | (conversation_df['MESSAGE_TYPE'].str.upper() == 'TRANSFER')
+        | (conversation_df['MESSAGE_TYPE'].str.upper() == 'TRANSFER') | (conversation_df['MESSAGE_TYPE'].str.upper() == 'TOOL')
     ]
     
     # Count agent messages from department-related skills and detect call requests
@@ -1676,7 +2013,7 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     system_transfer_messages = conversation_df[
         (conversation_df['SENT_BY'].str.upper() == 'SYSTEM') & 
         ((conversation_df['MESSAGE_TYPE'].str.upper() == 'PRIVATE MESSAGE') |
-         (conversation_df['MESSAGE_TYPE'].str.upper() == 'TRANSFER'))
+         (conversation_df['MESSAGE_TYPE'].str.upper() == 'TRANSFER') | (conversation_df['MESSAGE_TYPE'].str.upper() == 'TOOL'))
     ]
 
     
@@ -1727,9 +2064,17 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
         pass
     
     # Return tuple: (is_bot_handled, agent_message_count, has_call_request, counted_agent_messages, bot_message_count, is_bot_handled_excluding_fillers, has_valid_system_transfer, agent_message_count_excluding_pokes, agent_messages_from_allowed_skills, has_complaint_action)
-    # For CC_Resolvers: if has_complaint_action is True, conversation is NOT bot-handled regardless of agent_message_count
-    is_bot_handled = (agent_message_count == 0) and not (department_name == 'CC_Resolvers' and has_complaint_action)
-    is_bot_handled_excluding_fillers = (counted_agent_messages == 0) and not (department_name == 'CC_Resolvers' and has_complaint_action)  # New metric: bot handled excluding filler messages
+    # For CC_Resolvers: 
+    #   - if has_complaint_action is True, conversation is NOT bot-handled regardless of agent_message_count
+    #   - bot must have sent at least 1 normal message (bot_message_count > 0) to be considered handled
+    # For other departments: only check agent_message_count == 0
+    if department_name == 'CC_Resolvers':
+        is_bot_handled = (agent_message_count == 0) and not has_complaint_action and (bot_message_count > 0)
+        is_bot_handled_excluding_fillers = (counted_agent_messages == 0) and not has_complaint_action and (bot_message_count > 0)
+    else:
+        is_bot_handled = (agent_message_count == 0)
+        is_bot_handled_excluding_fillers = (counted_agent_messages == 0)
+    
     return is_bot_handled, agent_message_count, has_call_request, counted_agent_messages, bot_message_count, is_bot_handled_excluding_fillers, has_valid_system_transfer, agent_message_count_excluding_pokes, agent_normal_messages_under_agent_dept_skills, has_complaint_action
 
 
@@ -1935,8 +2280,8 @@ def calculate_proactive_agent_messages_mv_resolvers(session, department_name, de
                     if not target_skill:  # Skip empty skills
                         continue
                     
-                    # Check if current skill is GPT_MV_RESOLVERS
-                    if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills):
+                    # Check if current skill is GPT_MV_RESOLVERS (exclude GPT_MV_RESOLVERS_TA)
+                    if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills) and target_skill.upper() != 'GPT_MV_RESOLVERS_TA':
                         found_gpt_mv_resolvers = True
                         continue
                     
@@ -2100,8 +2445,8 @@ def calculate_proactive_agent_messages_mv_resolvers(session, department_name, de
                     if not target_skill:
                         continue
                     
-                    # Check if this is GPT_MV_RESOLVERS
-                    if any(bot_skill.upper() in target_skill for bot_skill in mv_resolvers_bot_skills):
+                    # Check if this is GPT_MV_RESOLVERS (exclude GPT_MV_RESOLVERS_TA)
+                    if any(bot_skill.upper() in target_skill for bot_skill in mv_resolvers_bot_skills) and target_skill != 'GPT_MV_RESOLVERS_TA':
                         found_gpt_mv_resolvers = True
                         continue
                     
@@ -2211,11 +2556,11 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         target_date: Target date for analysis
     
     Returns:
-        tuple: (total_count, our_bot_count, directly_handled_count, proactive_count, proactive_mv_resolvers_seniors_only_count, delighters_count, other_bots_count, base_conv_ids_set, our_bot_conv_ids_set, seniors_our_bot_to_mv_resolvers_seniors_count, seniors_our_bot_to_mv_callers_count, seniors_our_bot_to_pre_r_visa_retention_count, supervisor_excluded_conv_ids_set)
+        tuple: (total_count, our_bot_count, directly_handled_count, proactive_count, proactive_mv_resolvers_seniors_only_count, delighters_count, other_bots_count, base_conv_ids_set, our_bot_conv_ids_set, seniors_our_bot_to_mv_resolvers_seniors_count, seniors_our_bot_to_mv_callers_count, seniors_our_bot_to_pre_r_visa_retention_count, supervisor_excluded_conv_ids_set, no_response_transfers_count)
     """
     # Only applies to MV_Resolvers
     if department_name != 'MV_Resolvers':
-        return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, set()
+        return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, set(), 0
     
     try:
         department_config = departments_config[department_name]
@@ -2244,7 +2589,7 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         result_df_base = session.sql(query_base).to_pandas()
         
         if result_df_base.empty:
-            return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, set()
+            return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, set(), 0
         
         base_conv_ids = set(result_df_base['CONVERSATION_ID'].values)
         total_seniors_callers_count = len(base_conv_ids)
@@ -2264,7 +2609,7 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         result_df_full = session.sql(query_full_data).to_pandas()
         
         if result_df_full.empty:
-            return total_seniors_callers_count, 0, 0, 0, 0, 0, 0, base_conv_ids, set(), 0, 0, 0, set()
+            return total_seniors_callers_count, 0, 0, 0, 0, 0, 0, base_conv_ids, set(), 0, 0, 0, set(), 0
         
         # Filter out broadcasts: first message (by time) is system AND not CLIENT — any convo length
         excluded_broadcast_count = 0
@@ -2318,7 +2663,7 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         total_seniors_callers_count = len(base_conv_ids)
         
         if total_seniors_callers_count == 0:
-            return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, supervisor_excluded_conv_ids
+            return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, supervisor_excluded_conv_ids, 0
         
         # Initialize category sets (mutually exclusive with priority order)
         our_bot_conv_ids = set()
@@ -2326,6 +2671,7 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         proactive_conv_ids = set()
         delighters_conv_ids = set()
         other_bots_conv_ids = set()
+        no_response_transfers_conv_ids = set()  # New category: Priority 1
         
         # Get MV_Resolvers bot skills for pattern matching
         mv_resolvers_bot_skills = department_config.get('bot_skills', [])
@@ -2343,7 +2689,40 @@ def calculate_total_seniors_callers(session, department_name, departments_config
             
             categorized = False
             
-            # Priority 1: Proactive (first *chronological* message NOT from consumer/null agent/system normal OR single-row with agent skill)
+            # Priority 1: No Response Transfers
+            # Chats with GPT_RESOLVERS_BOT or GPT_MV_RESOLVERS where:
+            # - ALL messages under these skills have NULL/empty EXECUTION_ID
+            # - OR ANY message under these skills contains "by admin" in TEXT
+            target_bot_skills = ['GPT_RESOLVERS_BOT'] + mv_resolvers_bot_skills  # ['GPT_RESOLVERS_BOT', 'GPT_MV_RESOLVERS']
+            
+            bot_messages = conv_df_sorted[
+                conv_df_sorted['TARGET_SKILL_PER_MESSAGE'].apply(
+                    lambda x: (any(bot_skill.upper() in str(x).upper() for bot_skill in target_bot_skills) and str(x).upper() != 'GPT_MV_RESOLVERS_TA') if pd.notna(x) and str(x).strip() else False
+                )
+            ]
+            
+            if not bot_messages.empty:
+                # Check condition 1: ALL messages under bot skills have NULL/empty EXECUTION_ID
+                # all_null_execution = bot_messages['EXECUTION_ID'].apply(
+                #     lambda x: pd.isna(x) or str(x).strip() == ''
+                # ).all()
+                
+                # Check condition 2: ANY message under bot skills contains "by admin"
+                any_by_admin = bot_messages['TEXT'].apply(
+                    lambda x: 'by admin' in str(x).lower() if pd.notna(x) else False
+                ).any()
+                
+                # Check condition 3: ANY message under bot skills contains "Error Task:"
+                any_error_task = bot_messages['TEXT'].apply(
+                    lambda x: 'error task:' in str(x).lower() if pd.notna(x) else False
+                ).any()
+                
+                if  any_by_admin or any_error_task:
+                    no_response_transfers_conv_ids.add(conv_id)
+                    categorized = True
+                    continue
+            
+            # Priority 2: Proactive (first *chronological* message NOT from consumer/null agent/system normal OR single-row with agent skill)
             # Use iloc[0] after MESSAGE_SENT_TIME sort — do NOT use MESSAGE_SEQ==0 (can disagree with true order).
             # If first message has a non-empty TARGET_SKILL_PER_MESSAGE, it must be a dept agent skill; otherwise
             # another bot (e.g. GPT CC Shadowers) started the thread and this is not senior-initiated proactive.
@@ -2385,7 +2764,7 @@ def calculate_total_seniors_callers(session, department_name, departments_config
                     categorized = True
                     continue
             
-            # Priority 2: Directly handled (GPT_RESOLVERS_BOT → agent skill PATTERN)
+            # Priority 3: Directly handled (GPT_RESOLVERS_BOT → agent skill PATTERN)
             # BUT EXCLUDE if GPT_MV_RESOLVERS appears BETWEEN GPT_RESOLVERS_BOT and agent skill
             found_gpt_resolvers_bot = False
             for _, row in conv_df_sorted.iterrows():
@@ -2403,7 +2782,8 @@ def calculate_total_seniors_callers(session, department_name, departments_config
                 if found_gpt_resolvers_bot:
                     # This is the first non-GPT_RESOLVERS_BOT skill after GPT_RESOLVERS_BOT
                     # Check if it's GPT_MV_RESOLVERS (would interrupt the direct path)
-                    if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills):
+                    # Exclude GPT_MV_RESOLVERS_TA from matching
+                    if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills) and target_skill.upper() != 'GPT_MV_RESOLVERS_TA':
                         # GPT_MV_RESOLVERS is between GPT_RESOLVERS_BOT and agent skill
                         # Skip this - will be caught by "our_bot" category
                         break
@@ -2418,7 +2798,7 @@ def calculate_total_seniors_callers(session, department_name, departments_config
             if categorized:
                 continue
             
-            # Priority 3: Our bot (GPT_MV_RESOLVERS → agent skill PATTERN)
+            # Priority 4: Our bot (GPT_MV_RESOLVERS → agent skill PATTERN)
             found_gpt_mv_resolvers = False
             for _, row in conv_df_sorted.iterrows():
                 target_skill = str(row.get('TARGET_SKILL_PER_MESSAGE', '')).strip()
@@ -2426,8 +2806,8 @@ def calculate_total_seniors_callers(session, department_name, departments_config
                 if not target_skill:
                     continue
                 
-                # Check if current skill is GPT_MV_RESOLVERS
-                if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills):
+                # Check if current skill is GPT_MV_RESOLVERS (exclude GPT_MV_RESOLVERS_TA)
+                if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills) and target_skill.upper() != 'GPT_MV_RESOLVERS_TA':
                     found_gpt_mv_resolvers = True
                     continue
                 
@@ -2441,7 +2821,7 @@ def calculate_total_seniors_callers(session, department_name, departments_config
             if categorized:
                 continue
             
-            # Priority 4: Everything else goes to "other_bots"
+            # Priority 5: Everything else goes to "other_bots"
             if not categorized:
                 other_bots_conv_ids.add(conv_id)
         
@@ -2450,6 +2830,7 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         proactive_count = len(proactive_conv_ids)
         delighters_count = 0  # Excluded from base, tracked separately
         other_bots_count = len(other_bots_conv_ids)
+        no_response_transfers_count = len(no_response_transfers_conv_ids)
         
         # Calculate proactive MV_RESOLVERS_SENIORS only (sub-metric for business)
         proactive_mv_resolvers_seniors_only_count = 0
@@ -2513,8 +2894,8 @@ def calculate_total_seniors_callers(session, department_name, departments_config
                     if not target_skill:
                         continue
                     
-                    # Check if this is GPT_MV_RESOLVERS
-                    if any(bot_skill.upper() in target_skill for bot_skill in mv_resolvers_bot_skills):
+                    # Check if this is GPT_MV_RESOLVERS (exclude GPT_MV_RESOLVERS_TA)
+                    if any(bot_skill.upper() in target_skill for bot_skill in mv_resolvers_bot_skills) and target_skill != 'GPT_MV_RESOLVERS_TA':
                         found_gpt_mv_resolvers = True
                         continue
                     
@@ -2550,13 +2931,13 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         print(f"       └─ Other bots to seniors: {other_bots_count}")
         print(f"       └─ ADJUSTED Total check: {our_bot_count + directly_handled_count + proactive_count + other_bots_count} = {total_seniors_callers_count} (proactive adjusted to MV_RESOLVERS_SENIORS only)")
         
-        return total_seniors_callers_count, our_bot_count, directly_handled_count, proactive_count, proactive_mv_resolvers_seniors_only_count, delighters_count, other_bots_count, base_conv_ids, our_bot_conv_ids, seniors_our_bot_to_mv_resolvers_seniors_count, seniors_our_bot_to_mv_callers_count, seniors_our_bot_to_pre_r_visa_retention_count, supervisor_excluded_conv_ids
+        return total_seniors_callers_count, our_bot_count, directly_handled_count, proactive_count, proactive_mv_resolvers_seniors_only_count, delighters_count, other_bots_count, base_conv_ids, our_bot_conv_ids, seniors_our_bot_to_mv_resolvers_seniors_count, seniors_our_bot_to_mv_callers_count, seniors_our_bot_to_pre_r_visa_retention_count, supervisor_excluded_conv_ids, no_response_transfers_count
         
     except Exception as e:
         print(f"    ⚠️  Error calculating seniors/callers: {str(e)}")
         import traceback
         traceback.print_exc()
-        return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, set()
+        return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, set(), 0
 
 
 def store_resolvers_chats_breakdown(session, department_name, departments_config, target_date):
@@ -2714,7 +3095,46 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
             category = None
             sub_category = None
             
-            # Priority 1: Proactive — chronologically first row + agent skill guard (same as calculate_total_seniors_callers)
+            # Priority 1: No Response Transfers
+            # Chats with GPT_RESOLVERS_BOT or GPT_MV_RESOLVERS where:
+            # - ALL messages under these skills have NULL/empty EXECUTION_ID
+            # - OR ANY message under these skills contains "by admin" in TEXT
+            target_bot_skills = ['GPT_RESOLVERS_BOT'] + mv_resolvers_bot_skills  # ['GPT_RESOLVERS_BOT', 'GPT_MV_RESOLVERS']
+            
+            bot_messages = conv_df_sorted[
+                conv_df_sorted['TARGET_SKILL_PER_MESSAGE'].apply(
+                    lambda x: (any(bot_skill.upper() in str(x).upper() for bot_skill in target_bot_skills) and str(x).upper() != 'GPT_MV_RESOLVERS_TA') if pd.notna(x) and str(x).strip() else False
+                )
+            ]
+            
+            if not bot_messages.empty:
+                # Check condition 1: ALL messages under bot skills have NULL/empty EXECUTION_ID
+                # all_null_execution = bot_messages['EXECUTION_ID'].apply(
+                #     lambda x: pd.isna(x) or str(x).strip() == ''
+                # ).all()
+                
+                # Check condition 2: ANY message under bot skills contains "by admin"
+                any_by_admin = bot_messages['TEXT'].apply(
+                    lambda x: 'by admin' in str(x).lower() if pd.notna(x) else False
+                ).any()
+                
+                # Check condition 3: ANY message under bot skills contains "Error Task:"
+                any_error_task = bot_messages['TEXT'].apply(
+                    lambda x: 'error task:' in str(x).lower() if pd.notna(x) else False
+                ).any()
+                
+                if  any_by_admin or any_error_task:
+                    category = 'no_response_transfers'
+                    breakdown_records.append({
+                        'TARGET_DATE': target_date,
+                        'CONVERSATION_ID': conv_id,
+                        'CATEGORY': category,
+                        'SUB_CATEGORY': None,
+                        'THROUGH_SKILLS': through_skills
+                    })
+                    continue
+            
+            # Priority 2: Proactive — chronologically first row + agent skill guard (same as calculate_total_seniors_callers)
             if len(conv_df_sorted) > 0:
                 first_msg = conv_df_sorted.iloc[0]
                 target_skill_first = str(first_msg.get('TARGET_SKILL_PER_MESSAGE', '')).strip()
@@ -2764,7 +3184,7 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
                     })
                     continue
             
-            # Priority 2: Directly handled (GPT_RESOLVERS_BOT → agent skill PATTERN)
+            # Priority 3: Directly handled (GPT_RESOLVERS_BOT → agent skill PATTERN)
             # BUT EXCLUDE if GPT_MV_RESOLVERS appears BETWEEN GPT_RESOLVERS_BOT and agent skill
             found_gpt_resolvers_bot = False
             for _, row in conv_df_sorted.iterrows():
@@ -2782,7 +3202,8 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
                 if found_gpt_resolvers_bot:
                     # This is the first non-GPT_RESOLVERS_BOT skill after GPT_RESOLVERS_BOT
                     # Check if it's GPT_MV_RESOLVERS (would interrupt the direct path)
-                    if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills):
+                    # Exclude GPT_MV_RESOLVERS_TA from substring match
+                    if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills) and target_skill.upper() != 'GPT_MV_RESOLVERS_TA':
                         # GPT_MV_RESOLVERS is between GPT_RESOLVERS_BOT and agent skill
                         # Skip this - will be caught by "our_bot" category
                         break
@@ -2803,7 +3224,7 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
                 })
                 continue
             
-            # Priority 3: Our bot (GPT_MV_RESOLVERS → agent skill PATTERN)
+            # Priority 4: Our bot (GPT_MV_RESOLVERS → agent skill PATTERN)
             found_gpt_mv_resolvers = False
             for _, row in conv_df_sorted.iterrows():
                 target_skill = str(row.get('TARGET_SKILL_PER_MESSAGE', '')).strip()
@@ -2811,8 +3232,8 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
                 if not target_skill:
                     continue
                 
-                # Check if current skill is GPT_MV_RESOLVERS
-                if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills):
+                # Check if current skill is GPT_MV_RESOLVERS (exclude GPT_MV_RESOLVERS_TA)
+                if any(bot_skill.upper() in target_skill.upper() for bot_skill in mv_resolvers_bot_skills) and target_skill.upper() != 'GPT_MV_RESOLVERS_TA':
                     found_gpt_mv_resolvers = True
                     continue
                 
@@ -2888,7 +3309,7 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
                 })
                 continue
             
-            # Priority 4: Everything else goes to "other_bots"
+            # Priority 5: Everything else goes to "other_bots"
             if not category:
                 category = 'other_bots'
                 breakdown_records.append({
@@ -3125,6 +3546,63 @@ def calculate_total_guardrail(session, department_name, departments_config, targ
     except Exception as e:
         print(f"    ⚠️  Error calculating guardrail interventions: {str(e)}")
         return 0
+
+
+def get_guardrail_conversation_ids(session, department_name, target_date):
+    """
+    Get set of conversation IDs with guardrail interactions for a department.
+    
+    Queries the three main guardrail tables:
+    1. GUARDRAIL_STOPPED_TOOLS (wrong tools)
+    2. GUARDRAIL_MISSED_TOOLS (missed tools)
+    3. GUARDRAIL_FALSE_PROMISE_NO_TOOL (false promises with no tool)
+    
+    Args:
+        session: Snowflake session
+        department_name: Department name
+        target_date: Target date for analysis
+    
+    Returns:
+        set: Set of conversation IDs with guardrail interactions
+    """
+    # Only applies to departments with guardrails
+    if department_name not in ['MV_Resolvers', 'CC_Resolvers', 'multiple_contract_detector']:
+        return set()
+    
+    try:
+        # Query all guardrail tables to get conversation IDs
+        query = f"""
+        SELECT DISTINCT CONVERSATION_ID
+        FROM (
+            SELECT DISTINCT CONVERSATION_ID
+            FROM GUARDRAIL_STOPPED_TOOLS
+            WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+
+            UNION
+
+            SELECT DISTINCT CONVERSATION_ID
+            FROM GUARDRAIL_MISSED_TOOLS
+            WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+
+            UNION
+
+            SELECT DISTINCT CONVERSATION_ID
+            FROM GUARDRAIL_FALSE_PROMISE_NO_TOOL
+            WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+        ) all_guardrails
+        """
+        
+        result_df = session.sql(query).to_pandas()
+        
+        if result_df.empty:
+            return set()
+        
+        guardrail_conv_ids = set(result_df['CONVERSATION_ID'].values)
+        return guardrail_conv_ids
+        
+    except Exception as e:
+        print(f"    ⚠️  Error querying guardrail conversation IDs: {str(e)}")
+        return set()
 
 
 def calculate_guardrail_agent(session, department_name, departments_config, target_date):
@@ -3572,9 +4050,19 @@ def analyze_guardrail_stopped_tools(session, df, department_name, target_date):
                                 tool_args = tool_call.get('args', {})
                                 tool_type = tool_call.get('type', '')
                                 
-                                # Extract specific fields from args
-                                target_agent = tool_args.get('Agent', tool_args.get('agent', ''))
-                                policy_used = tool_args.get('PolicyUsed', tool_args.get('policy', ''))
+                                # Handle new structure: args might have a 'query' wrapper
+                                # New: {"args": {"query": {"Agent": "...", "PolicyUsed": "..."}}}
+                                # Old: {"args": {"Agent": "...", "PolicyUsed": "..."}}
+                                if 'query' in tool_args and isinstance(tool_args['query'], dict):
+                                    # New structure: extract from query
+                                    args_data = tool_args['query']
+                                else:
+                                    # Old structure: use args directly
+                                    args_data = tool_args
+                                
+                                # Extract specific fields from args_data
+                                target_agent = args_data.get('Agent', args_data.get('agent', ''))
+                                policy_used = args_data.get('PolicyUsed', args_data.get('policy', ''))
                                 
                                 # Extract TARGET_SKILL_PER_MESSAGE, EXECUTION_ID, and MESSAGE_ID from the message row
                                 target_skill_per_message = msg.get('TARGET_SKILL_PER_MESSAGE', '')
@@ -5017,6 +5505,160 @@ def generate_guardrail_summary_by_tool(session, department_name, target_date):
         print(f"    ⚠️  Error generating guardrail summary by tool: {str(e)}")
         return 0
 
+def generate_tool_usage_analysis(session, department_name, target_date):
+    """
+    Generate tool usage analysis showing execution patterns and frequency per tool.
+    
+    For each tool, calculates:
+    - Actual Executions (successful, not stopped by guardrails)
+    - Conversations where tool was called once, twice, or 3+ times
+    
+    Args:
+        session: Snowflake session
+        department_name: Department name
+        target_date: Target date for analysis
+    
+    Returns:
+        int: Number of tools analyzed
+    """
+    print(f"  🔧 Generating tool usage analysis for {department_name}...")
+    
+    try:
+        # Build SQL query for tool usage analysis
+        query = f"""
+        WITH total_conversations AS (
+            -- Total conversations (for percentage denominators)
+            SELECT COUNT(DISTINCT CONVERSATION_ID) as TOTAL_CONVS
+            FROM CONVERSATION_CATEGORIES
+            WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+        ),
+        all_tool_calls AS (
+            -- All tool call attempts per tool
+            SELECT 
+                TOOL_NAME,
+                COUNT(*) as TOTAL_ATTEMPTS,
+                COUNT(DISTINCT CONVERSATION_ID) as TOTAL_CONVS_WITH_TOOL
+            FROM CONVERSATION_TOOL_CALLS
+            WHERE DATE = '{target_date}' AND DEPARTMENT = '{department_name}'
+            GROUP BY TOOL_NAME
+        ),
+        successful_tool_calls AS (
+            -- Successful tool calls (not stopped by guardrails)
+            SELECT 
+                ct.TOOL_NAME,
+                ct.CONVERSATION_ID,
+                ct.TOOL_CALL_ID
+            FROM CONVERSATION_TOOL_CALLS ct
+            LEFT JOIN GUARDRAIL_STOPPED_TOOLS gst
+                ON ct.TOOL_CALL_ID = gst.TOOL_CALL_ID
+                AND ct.DATE = gst.DATE
+                AND ct.DEPARTMENT = gst.DEPARTMENT
+            WHERE ct.DATE = '{target_date}' 
+              AND ct.DEPARTMENT = '{department_name}'
+              AND gst.TOOL_CALL_ID IS NULL
+        ),
+        successful_executions AS (
+            -- Count successful executions per tool
+            SELECT 
+                TOOL_NAME,
+                COUNT(*) as ACTUAL_EXECUTIONS
+            FROM successful_tool_calls
+            GROUP BY TOOL_NAME
+        ),
+        tool_calls_per_conversation AS (
+            -- Count how many times each tool was called per conversation (successful only)
+            SELECT 
+                TOOL_NAME,
+                CONVERSATION_ID,
+                COUNT(*) as CALL_COUNT
+            FROM successful_tool_calls
+            GROUP BY TOOL_NAME, CONVERSATION_ID
+        ),
+        frequency_buckets AS (
+            -- Categorize conversations into frequency buckets per tool
+            SELECT 
+                TOOL_NAME,
+                COUNT(DISTINCT CASE WHEN CALL_COUNT = 1 THEN CONVERSATION_ID END) as CALLED_ONCE_COUNT,
+                COUNT(DISTINCT CASE WHEN CALL_COUNT = 2 THEN CONVERSATION_ID END) as CALLED_TWICE_COUNT,
+                COUNT(DISTINCT CASE WHEN CALL_COUNT >= 3 THEN CONVERSATION_ID END) as CALLED_THRICE_PLUS_COUNT
+            FROM tool_calls_per_conversation
+            GROUP BY TOOL_NAME
+        )
+        SELECT 
+            atc.TOOL_NAME,
+            
+            -- Actual Executions (successful, not blocked)
+            COALESCE(se.ACTUAL_EXECUTIONS, 0) as ACTUAL_EXECUTIONS_COUNT,
+            ROUND((COALESCE(se.ACTUAL_EXECUTIONS, 0) * 100.0 / NULLIF(tc.TOTAL_CONVS, 0)), 2) as ACTUAL_EXECUTIONS_PCT,
+            
+            -- Called Once in Chat
+            COALESCE(fb.CALLED_ONCE_COUNT, 0) as CALLED_ONCE_COUNT,
+            ROUND((COALESCE(fb.CALLED_ONCE_COUNT, 0) * 100.0 / NULLIF(tc.TOTAL_CONVS, 0)), 2) as CALLED_ONCE_PCT,
+            
+            -- Called Twice in Chat
+            COALESCE(fb.CALLED_TWICE_COUNT, 0) as CALLED_TWICE_COUNT,
+            ROUND((COALESCE(fb.CALLED_TWICE_COUNT, 0) * 100.0 / NULLIF(tc.TOTAL_CONVS, 0)), 2) as CALLED_TWICE_PCT,
+            
+            -- Called Thrice+ in Chat
+            COALESCE(fb.CALLED_THRICE_PLUS_COUNT, 0) as CALLED_THRICE_PLUS_COUNT,
+            ROUND((COALESCE(fb.CALLED_THRICE_PLUS_COUNT, 0) * 100.0 / NULLIF(tc.TOTAL_CONVS, 0)), 2) as CALLED_THRICE_PLUS_PCT,
+            
+            -- Reference columns
+            atc.TOTAL_ATTEMPTS,
+            tc.TOTAL_CONVS as TOTAL_CONVERSATIONS
+            
+        FROM all_tool_calls atc
+        CROSS JOIN total_conversations tc
+        LEFT JOIN successful_executions se ON atc.TOOL_NAME = se.TOOL_NAME
+        LEFT JOIN frequency_buckets fb ON atc.TOOL_NAME = fb.TOOL_NAME
+        ORDER BY COALESCE(se.ACTUAL_EXECUTIONS, 0) DESC
+        """
+        
+        # Execute query
+        print(f"    🔍 Executing tool usage analysis query...")
+        analysis_df = session.sql(query).to_pandas()
+        
+        if analysis_df.empty:
+            print(f"    ℹ️  No tool usage data generated for {department_name}")
+            return 0
+        
+        print(f"    ✅ Generated analysis for {len(analysis_df)} tools")
+        
+        # Define columns for the table
+        columns = [
+            'TOOL_NAME',
+            'ACTUAL_EXECUTIONS_COUNT',
+            'ACTUAL_EXECUTIONS_PCT',
+            'CALLED_ONCE_COUNT',
+            'CALLED_ONCE_PCT',
+            'CALLED_TWICE_COUNT',
+            'CALLED_TWICE_PCT',
+            'CALLED_THRICE_PLUS_COUNT',
+            'CALLED_THRICE_PLUS_PCT',
+            'TOTAL_ATTEMPTS',
+            'TOTAL_CONVERSATIONS'
+        ]
+        
+        try:
+            # Save using insert_raw_data_with_cleanup
+            insert_raw_data_with_cleanup(
+                session=session,
+                table_name="TOOL_USAGE_ANALYSIS",
+                department=department_name,
+                target_date=target_date,
+                dataframe=analysis_df[columns],
+                columns=columns
+            )
+            print(f"    💾 Saved tool usage analysis to TOOL_USAGE_ANALYSIS table")
+        except Exception as save_error:
+            print(f"    ⚠️  Failed to save tool usage analysis: {str(save_error)}")
+        
+        return len(analysis_df)
+    
+    except Exception as e:
+        print(f"    ⚠️  Error generating tool usage analysis: {str(e)}")
+        return 0
+
 
 def analyze_bot_handled_conversations_single_department(session, df, department_name, departments_config, target_date):
     """
@@ -5049,6 +5691,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     our_bot_to_mv_callers_count = 0
     our_bot_to_pre_r_visa_retention_count = 0
     total_seniors_callers_count = 0
+    seniors_no_response_transfers_count = 0
     seniors_our_bot_count = 0
     seniors_directly_handled_count = 0
     seniors_proactive_count = 0
@@ -5070,7 +5713,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             session, department_name, departments_config, target_date
         )
         # MV_Resolvers specific: Calculate total seniors/callers and categorize paths (THIS IS THE SOURCE OF TRUTH)
-        total_seniors_callers_count, seniors_our_bot_count, seniors_directly_handled_count, seniors_proactive_count, seniors_proactive_mv_resolvers_seniors_only_count, seniors_delighters_count, seniors_other_bots_count, seniors_conv_ids, our_bot_to_seniors_conv_ids, seniors_our_bot_to_mv_resolvers_seniors_count, seniors_our_bot_to_mv_callers_count, seniors_our_bot_to_pre_r_visa_retention_count, seniors_supervisor_excluded_conv_ids = calculate_total_seniors_callers(
+        total_seniors_callers_count, seniors_our_bot_count, seniors_directly_handled_count, seniors_proactive_count, seniors_proactive_mv_resolvers_seniors_only_count, seniors_delighters_count, seniors_other_bots_count, seniors_conv_ids, our_bot_to_seniors_conv_ids, seniors_our_bot_to_mv_resolvers_seniors_count, seniors_our_bot_to_mv_callers_count, seniors_our_bot_to_pre_r_visa_retention_count, seniors_supervisor_excluded_conv_ids, seniors_no_response_transfers_count = calculate_total_seniors_callers(
             session, department_name, departments_config, target_date
         )
     #     
@@ -5135,8 +5778,15 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': 0.0,
             'complaint_action_count': 0,
             'complaint_action_percentage': 0.0,
+            'complaint_action_with_0_agent_messages_count': 0,
+            'complaint_action_with_0_agent_messages_percentage': 0.0,
+            'complaint_action_with_1_plus_agent_messages_count': 0,
+            'complaint_action_with_1_plus_agent_messages_percentage': 0.0,
             'chats_with_no_bot_messages_count': 0,
             'chats_with_no_bot_messages_percentage': 0.0,
+            'bot_handled_with_bot_response_count': 0,
+            'bot_handled_with_bot_response_percentage': 0.0,
+            'conversations_with_bot_response_count': 0,
             'proactive_agent_messages_count': proactive_agent_messages_count,
             'proactive_agent_messages_percentage': 0.0,
             'directly_handled_by_seniors_count': directly_handled_by_seniors_count,
@@ -5238,9 +5888,16 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     
     # Initialize CC_Resolvers specific counter for complaint actions
     complaint_action_count = 0
+    complaint_action_with_0_agent_messages_count = 0
+    complaint_action_with_1_plus_agent_messages_count = 0
     
     # Initialize CC_Resolvers specific: Track conversations with no bot messages from GPT_CC_RESOLVERS
     chats_with_no_bot_messages_count = 0
+    
+    # Initialize CC_Resolvers specific: Track handle ratio when bot responds
+    # (Exclude conversations with 0 bot messages from both numerator and denominator)
+    bot_handled_with_bot_response_count = 0
+    conversations_with_bot_response_count = 0
     
     # Initialize intervention conversations data collection
     intervention_conversations_data = []
@@ -5259,6 +5916,13 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             
             if len(bot_cc_resolvers_messages) == 0:
                 chats_with_no_bot_messages_count += 1
+            
+            # Track handle ratio when bot responds (bot_message_count > 0)
+            # This excludes conversations where bot never sent a normal message
+            if bot_message_count > 0:
+                conversations_with_bot_response_count += 1
+                if is_bot_handled:
+                    bot_handled_with_bot_response_count += 1
         
 
         # Track intervention metrics across all conversations
@@ -5272,6 +5936,11 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         # Track CC_Resolvers specific: complaint actions (regardless of bot-handled status)
         if has_complaint_action:
             complaint_action_count += 1
+            # Split by agent message count
+            if agent_message_count == 0:
+                complaint_action_with_0_agent_messages_count += 1
+            elif agent_message_count >= 1:
+                complaint_action_with_1_plus_agent_messages_count += 1
         
         # Track new metric: bot handled excluding fillers
         if is_bot_handled_excluding_fillers:
@@ -5296,24 +5965,33 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             bot_handled_conversations_data.extend(conv_data.to_dict('records'))
         else:
             # Count conversations with agent messages (not bot-handled cases)
-            # For CC_Resolvers: also count complaint actions as 1+ agent messages
-            if agent_message_count >= 1 or has_complaint_action:
-                chats_with_n_plus_agent_messages_data.append({
-                        'CONVERSATION_ID': conv_id,
-                        'DEPARTMENT_NAME': department_name,
-                        'TARGET_DATE': target_date,
-                        'AGENT_MESSAGE_COUNT': agent_message_count,
-                        'ANALYSIS_DATE': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    })
-                chats_with_1_plus_agent_messages += 1
-            if agent_message_count >= 2:
-                chats_with_2_plus_agent_messages += 1
-            if agent_message_count >= 3:
-                chats_with_3_plus_agent_messages += 1
+            # For CC_Resolvers: only count if bot sent at least 1 message (bot_message_count > 0)
+            # For other departments: count all
+            
+            should_count_in_breakdown = True
+            if department_name == 'CC_Resolvers' and bot_message_count == 0:
+                should_count_in_breakdown = False
+            
+            if should_count_in_breakdown:
+                # For CC_Resolvers: also count complaint actions as 1+ agent messages
+                if agent_message_count >= 1 or has_complaint_action:
+                    chats_with_n_plus_agent_messages_data.append({
+                            'CONVERSATION_ID': conv_id,
+                            'DEPARTMENT_NAME': department_name,
+                            'TARGET_DATE': target_date,
+                            'AGENT_MESSAGE_COUNT': agent_message_count,
+                            'ANALYSIS_DATE': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                    chats_with_1_plus_agent_messages += 1
+                if agent_message_count >= 2:
+                    chats_with_2_plus_agent_messages += 1
+                if agent_message_count >= 3:
+                    chats_with_3_plus_agent_messages += 1
             
             # Count conversations with 1+ agent messages excluding pokes
             if agent_message_count_excluding_pokes >= 1:
-                chats_with_1_plus_agent_messages_excluding_pokes += 1
+                if should_count_in_breakdown:
+                    chats_with_1_plus_agent_messages_excluding_pokes += 1
          # Check if conversation has any poke messages (regardless of bot_handled status)
         has_poke = False
         for idx, message in conv_df.iterrows():
@@ -5342,12 +6020,18 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             chats_with_pokes += 1
         
         # Count conversations with exactly 1, 2, or 3 agent messages from allowed skills (regardless of bot_handled status)
-        if agent_messages_from_allowed_skills == 1:
-            chats_with_exactly_1_agent_message += 1
-        if agent_messages_from_allowed_skills == 2:
-            chats_with_exactly_2_agent_messages += 1
-        if agent_messages_from_allowed_skills == 3:
-            chats_with_exactly_3_agent_messages += 1
+        # For CC_Resolvers: only count if bot sent at least 1 message
+        should_count_exact = True
+        if department_name == 'CC_Resolvers' and bot_message_count == 0:
+            should_count_exact = False
+        
+        if should_count_exact:
+            if agent_messages_from_allowed_skills == 1:
+                chats_with_exactly_1_agent_message += 1
+            if agent_messages_from_allowed_skills == 2:
+                chats_with_exactly_2_agent_messages += 1
+            if agent_messages_from_allowed_skills == 3:
+                chats_with_exactly_3_agent_messages += 1
         
         # Check for intervention conversations (regardless of bot_handled status)
         # This captures system transfers from bot to agent skills even if no agent messages were sent
@@ -5368,7 +6052,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
                 _sys_msgs = conv_df[
                     (conv_df['SENT_BY'].str.upper() == 'SYSTEM') &
                     ((conv_df['MESSAGE_TYPE'].str.upper() == 'PRIVATE MESSAGE') |
-                     (conv_df['MESSAGE_TYPE'].str.upper() == 'TRANSFER'))
+                     (conv_df['MESSAGE_TYPE'].str.upper() == 'TRANSFER') | (conv_df['MESSAGE_TYPE'].str.upper() == 'TOOL'))
                 ]
                 _classified = False
                 for _, _msg in _sys_msgs.iterrows():
@@ -5405,9 +6089,14 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     
     # Calculate percentage for CC_Resolvers complaint actions
     complaint_action_percentage = (complaint_action_count / total_conversations * 100) if total_conversations > 0 else 0
+    complaint_action_with_0_agent_messages_percentage = (complaint_action_with_0_agent_messages_count / total_conversations * 100) if total_conversations > 0 else 0
+    complaint_action_with_1_plus_agent_messages_percentage = (complaint_action_with_1_plus_agent_messages_count / total_conversations * 100) if total_conversations > 0 else 0
     
     # Calculate percentage for CC_Resolvers chats with no bot messages
     chats_with_no_bot_messages_percentage = (chats_with_no_bot_messages_count / total_conversations * 100) if total_conversations > 0 else 0
+    
+    # Calculate percentage for CC_Resolvers handle ratio when bot responds
+    bot_handled_with_bot_response_percentage = (bot_handled_with_bot_response_count / conversations_with_bot_response_count * 100) if conversations_with_bot_response_count > 0 else 0
     
     # Calculate percentage for poke conversations
     chats_with_pokes_percentage = (chats_with_pokes / total_conversations * 100) if total_conversations > 0 else 0
@@ -5455,6 +6144,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     our_bot_to_pre_r_visa_retention_percentage = (our_bot_to_pre_r_visa_retention_count / our_bot_to_seniors_count * 100) if our_bot_to_seniors_count > 0 else 0
     
     # Calculate percentages for NEW seniors breakdown (out of UNIQUE_UNION_COUNT for MV_Resolvers, otherwise total_seniors_callers_count)
+    seniors_no_response_transfers_percentage = (seniors_no_response_transfers_count / unique_union_count * 100) if unique_union_count > 0 else (seniors_no_response_transfers_count / total_seniors_callers_count * 100) if total_seniors_callers_count > 0 else 0
     seniors_our_bot_percentage = (seniors_our_bot_count / unique_union_count * 100) if unique_union_count > 0 else (seniors_our_bot_count / total_seniors_callers_count * 100) if total_seniors_callers_count > 0 else 0
     seniors_directly_handled_percentage = (seniors_directly_handled_count / unique_union_count * 100) if unique_union_count > 0 else (seniors_directly_handled_count / total_seniors_callers_count * 100) if total_seniors_callers_count > 0 else 0
     seniors_proactive_percentage = (seniors_proactive_count / unique_union_count * 100) if unique_union_count > 0 else (seniors_proactive_count / total_seniors_callers_count * 100) if total_seniors_callers_count > 0 else 0
@@ -5541,8 +6231,15 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'transferred_conversation_count': transferred_conversation_count,
         'complaint_action_count': complaint_action_count,
         'complaint_action_percentage': complaint_action_percentage,
+        'complaint_action_with_0_agent_messages_count': complaint_action_with_0_agent_messages_count,
+        'complaint_action_with_0_agent_messages_percentage': complaint_action_with_0_agent_messages_percentage,
+        'complaint_action_with_1_plus_agent_messages_count': complaint_action_with_1_plus_agent_messages_count,
+        'complaint_action_with_1_plus_agent_messages_percentage': complaint_action_with_1_plus_agent_messages_percentage,
         'chats_with_no_bot_messages_count': chats_with_no_bot_messages_count,
         'chats_with_no_bot_messages_percentage': chats_with_no_bot_messages_percentage,
+        'bot_handled_with_bot_response_count': bot_handled_with_bot_response_count,
+        'bot_handled_with_bot_response_percentage': bot_handled_with_bot_response_percentage,
+        'conversations_with_bot_response_count': conversations_with_bot_response_count,
         'proactive_agent_messages_count': proactive_agent_messages_count,
         'proactive_agent_messages_percentage': proactive_agent_messages_percentage,
         'directly_handled_by_seniors_count': directly_handled_by_seniors_count,
@@ -5569,6 +6266,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'delighters_to_seniors_percentage': delighters_to_seniors_percentage,
         'total_seniors_callers_count': total_seniors_callers_count,
         'total_seniors_callers_percentage': total_seniors_callers_percentage,
+        'seniors_no_response_transfers_count': seniors_no_response_transfers_count,
+        'seniors_no_response_transfers_percentage': seniors_no_response_transfers_percentage,
         'seniors_our_bot_count': seniors_our_bot_count,
         'seniors_our_bot_percentage': seniors_our_bot_percentage,
         'seniors_directly_handled_count': seniors_directly_handled_count,
@@ -5616,7 +6315,10 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     # CC_Resolvers specific: Print complaint action stats
     if department_name == 'CC_Resolvers':
         print(f"    🚨 Complaint actions (Open_or_CommentOn_Complaint): {complaint_action_count} ({complaint_action_percentage:.1f}%)")
+        print(f"       └─ With 0 agent messages: {complaint_action_with_0_agent_messages_count} ({complaint_action_with_0_agent_messages_percentage:.1f}%)")
+        print(f"       └─ With 1+ agent messages: {complaint_action_with_1_plus_agent_messages_count} ({complaint_action_with_1_plus_agent_messages_percentage:.1f}%)")
         print(f"    ⚠️  Chats with no bot messages from GPT_CC_RESOLVERS: {chats_with_no_bot_messages_count} ({chats_with_no_bot_messages_percentage:.1f}%)")
+        print(f"    🎯 Handle ratio when bot responds (excluding 0 bot message chats): {bot_handled_with_bot_response_count}/{conversations_with_bot_response_count} ({bot_handled_with_bot_response_percentage:.1f}%)")
     
     # MV_RESOLVERS PROACTIVE AGENT METRICS PRINT DISABLED
     # # MV_Resolvers specific: Print proactive agent metrics
@@ -5698,7 +6400,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         print(f"    ℹ️  No intervention conversations found for {department_name}")
     
     # Save chats with n plus agent messages data to CHATS_WITH_N_PLUS_AGENT_MESSAGES table
-    if chats_with_n_plus_agent_messages_data and department_name == 'CC_Resolvers':
+    if chats_with_n_plus_agent_messages_data:
         try:
             chats_with_n_plus_agent_messages_df = pd.DataFrame(chats_with_n_plus_agent_messages_data)
             chats_with_n_plus_agent_messages_df = clean_dataframe_for_snowflake(chats_with_n_plus_agent_messages_df)
@@ -5805,6 +6507,12 @@ def analyze_bot_handled_conversations_all_departments(session: snowpark.Session,
                 session, department_name, target_date
             )
 
+            # Generate tool usage analysis (for CC_Resolvers)
+            if department_name == 'CC_Resolvers':
+                generate_tool_usage_analysis(
+                    session, department_name, target_date
+                )
+
             # Sales Bot and AT bots: tool-name-based guardrail analytics
             # These departments do not use conversation categories, so guardrail
             # reporting is built around tool names instead.
@@ -5831,7 +6539,12 @@ def analyze_bot_handled_conversations_all_departments(session: snowpark.Session,
             bot_results = analyze_bot_handled_conversations_single_department(
                 session, filtered_df, department_name, departments_config, target_date
             )
-            
+
+            # Attach filtering_stats so exclusion breakdown columns (Excluded_*)
+            # can be populated in create_(enhanced_)combined_metrics_snowflake.
+            if isinstance(bot_results, dict) and isinstance(phase1_stats, dict):
+                bot_results['filtering_stats'] = phase1_stats
+
             department_results[department_name] = bot_results
             
         except Exception as e:
@@ -6914,15 +7627,15 @@ def get_conversations_without_filter_5_all_departments(session: snowpark.Session
             # Save raw data if successful
             if success and not filtered_df.empty:
                 filtered_df = clean_dataframe_for_snowflake(filtered_df)
-                dynamic_columns = [col for col in filtered_df.columns if col not in ['DATE', 'DEPARTMENT', 'TIMESTAMP']]
-                insert_raw_data_with_cleanup(
-                    session=session,
-                    table_name="CONVERSATIONS_WITHOUT_FILTER_5",
-                    department=department_name,
-                    target_date=target_date,
-                    dataframe=filtered_df[dynamic_columns],
-                    columns=dynamic_columns
-                )
+                # dynamic_columns = [col for col in filtered_df.columns if col not in ['DATE', 'DEPARTMENT', 'TIMESTAMP']]
+                # insert_raw_data_with_cleanup(
+                #     session=session,
+                #     table_name="CONVERSATIONS_WITHOUT_FILTER_5",
+                #     department=department_name,
+                #     target_date=target_date,
+                #     dataframe=filtered_df[dynamic_columns],
+                #     columns=dynamic_columns
+                # )
             
             print(f"    ✅ {department_name}: {conversation_count} conversations")
         except Exception as e:
@@ -7034,13 +7747,21 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'Excluded_Hi_Bye_Chats':        excluded_hi_bye,
             'Excluded_Wrong_Date_Chats':    excluded_wrong_date,
             'Total_Excluded_Chats':         total_excluded,
+            'CONSUMER_ONLY_CHATS_COUNT':    _fs.get('consumer_only_chats_count', 0),
             'Bot_Handled_Count': bot_data.get('bot_handled_count', 0),
             'Bot_Handled_Percentage': round(bot_data.get('bot_handled_percentage', 0), 2),
             # CC_Resolvers Specific Metrics
             'COMPLAINT_ACTION_COUNT': bot_data.get('complaint_action_count', 0),
             'COMPLAINT_ACTION_PERCENTAGE': round(bot_data.get('complaint_action_percentage', 0), 2),
+            'COMPLAINT_ACTION_WITH_0_AGENT_MESSAGES_COUNT': bot_data.get('complaint_action_with_0_agent_messages_count', 0),
+            'COMPLAINT_ACTION_WITH_0_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('complaint_action_with_0_agent_messages_percentage', 0), 2),
+            'COMPLAINT_ACTION_WITH_1_PLUS_AGENT_MESSAGES_COUNT': bot_data.get('complaint_action_with_1_plus_agent_messages_count', 0),
+            'COMPLAINT_ACTION_WITH_1_PLUS_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('complaint_action_with_1_plus_agent_messages_percentage', 0), 2),
             'CHATS_WITH_NO_BOT_MESSAGES_COUNT': bot_data.get('chats_with_no_bot_messages_count', 0),
             'CHATS_WITH_NO_BOT_MESSAGES_PERCENTAGE': round(bot_data.get('chats_with_no_bot_messages_percentage', 0), 2),
+            'BOT_HANDLED_WITH_BOT_RESPONSE_COUNT': bot_data.get('bot_handled_with_bot_response_count', 0),
+            'BOT_HANDLED_WITH_BOT_RESPONSE_PERCENTAGE': round(bot_data.get('bot_handled_with_bot_response_percentage', 0), 2),
+            'CONVERSATIONS_WITH_BOT_RESPONSE_COUNT': bot_data.get('conversations_with_bot_response_count', 0),
             
             # Call Requests Metrics
             'Call_Requests_Count': bot_data.get('call_requests_count', 0),
@@ -7263,6 +7984,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'Excluded_Hi_Bye_Chats': 'NUMBER',
                 'Excluded_Wrong_Date_Chats': 'NUMBER',
                 'Total_Excluded_Chats': 'NUMBER',
+                'CONSUMER_ONLY_CHATS_COUNT': 'NUMBER',
                 'Bot_Handled_Count': 'NUMBER',
                 'Bot_Handled_Percentage': 'FLOAT',
                 'Chats_With_1_Plus_Agent_Messages': 'NUMBER',
@@ -7290,8 +8012,15 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'Agent_Intervention_Percentage': 'FLOAT',
                 'COMPLAINT_ACTION_COUNT': 'NUMBER',
                 'COMPLAINT_ACTION_PERCENTAGE': 'FLOAT',
+                'COMPLAINT_ACTION_WITH_0_AGENT_MESSAGES_COUNT': 'NUMBER',
+                'COMPLAINT_ACTION_WITH_0_AGENT_MESSAGES_PERCENTAGE': 'FLOAT',
+                'COMPLAINT_ACTION_WITH_1_PLUS_AGENT_MESSAGES_COUNT': 'NUMBER',
+                'COMPLAINT_ACTION_WITH_1_PLUS_AGENT_MESSAGES_PERCENTAGE': 'FLOAT',
                 'CHATS_WITH_NO_BOT_MESSAGES_COUNT': 'NUMBER',
                 'CHATS_WITH_NO_BOT_MESSAGES_PERCENTAGE': 'FLOAT',
+                'BOT_HANDLED_WITH_BOT_RESPONSE_COUNT': 'NUMBER',
+                'BOT_HANDLED_WITH_BOT_RESPONSE_PERCENTAGE': 'FLOAT',
+                'CONVERSATIONS_WITH_BOT_RESPONSE_COUNT': 'NUMBER',
                 'PROACTIVE_AGENT_MESSAGES_COUNT': 'NUMBER',
                 'PROACTIVE_AGENT_MESSAGES_PERCENTAGE': 'FLOAT',
                 'DIRECTLY_HANDLED_BY_SENIORS_COUNT': 'NUMBER',
@@ -7318,6 +8047,8 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'DELIGHTERS_TO_SENIORS_PERCENTAGE': 'FLOAT',
                 'TOTAL_SENIORS_CALLERS_COUNT': 'NUMBER',
                 'TOTAL_SENIORS_CALLERS_PERCENTAGE': 'FLOAT',
+                'SENIORS_NO_RESPONSE_TRANSFERS_COUNT': 'NUMBER',
+                'SENIORS_NO_RESPONSE_TRANSFERS_PERCENTAGE': 'FLOAT',
                 'SENIORS_OUR_BOT_COUNT': 'NUMBER',
                 'SENIORS_OUR_BOT_PERCENTAGE': 'FLOAT',
                 'SENIORS_DIRECTLY_HANDLED_COUNT': 'NUMBER',
@@ -7453,6 +8184,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'Excluded_Hi_Bye_Chats':         'NUMBER',
                 'Excluded_Wrong_Date_Chats':     'NUMBER',
                 'Total_Excluded_Chats':          'NUMBER',
+                'CONSUMER_ONLY_CHATS_COUNT':     'NUMBER',
                 'AVG_BOT_MSGS_BEFORE_TRANSFER':  'FLOAT',
                 'TRANSFERRED_CONVERSATION_COUNT':'NUMBER',
                 'MCD_MV_TRANSFER_COUNT':         'NUMBER',
@@ -8407,9 +9139,8 @@ def analyze_intervention_reengagement_single_conversation_snowflake(conversation
                 
                 if poke_match or simple_match:
                     is_poke = True
-                    # Debug: print first few pokes found
-                    if len(intervention_messages) < 3:
-                        print(f"    DEBUG {department_name} poke found: '{message_content[:80]}' | skill: {message_skill} | sender: {sender_type}")
+               
+                       
             
             if is_poke:
                 intervention_messages.append({
@@ -10437,7 +11168,17 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
         if department_name == 'CC_Resolvers':
             print(f"DEBUG ENHANCED: CC_Resolvers bot_data keys present: {'chats_with_no_bot_messages_count' in bot_data}, {'chats_with_no_bot_messages_percentage' in bot_data}")
             print(f"DEBUG ENHANCED: CC_Resolvers no bot messages values: COUNT={bot_data.get('chats_with_no_bot_messages_count', 'MISSING')}, PERCENTAGE={bot_data.get('chats_with_no_bot_messages_percentage', 'MISSING')}")
-        
+
+        _fs = bot_data.get('filtering_stats', {})
+        _total_original      = _fs.get('total_original_conversations', 0)
+        _engagement_valid    = _fs.get('engagement_valid_conversations', 0)
+        _bot_skills_valid    = _fs.get('conversations_with_bot_skills', 0)
+        excluded_no_engagement = max(_total_original - _engagement_valid, 0)
+        excluded_no_bot_skill  = max(_engagement_valid - _bot_skills_valid, 0)
+        excluded_hi_bye        = _fs.get('hi_bye_conversations_removed', 0)
+        excluded_wrong_date    = _fs.get('conversations_filtered_by_date', 0)
+        total_excluded         = max(_total_original - bot_data.get('total_conversations', 0), 0)
+
         metrics = {
             'Date': current_date,
             'Department': department_name,
@@ -10445,6 +11186,13 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             # Bot Handling Metrics (Phase 2)
             'Total_Conversations': conversations_without_filter_5_data.get('total_conversations', 0),
             'Chats_Supposed_to_be_Bot_Handled': bot_data.get('total_conversations', 0),
+            # Exclusion breakdown: chats removed on the way from ChatCC to Chats_Supposed_to_be_Bot_Handled
+            'Excluded_No_Engagement_Chats': excluded_no_engagement,
+            'Excluded_No_Bot_Skill_Chats':  excluded_no_bot_skill,
+            'Excluded_Hi_Bye_Chats':        excluded_hi_bye,
+            'Excluded_Wrong_Date_Chats':    excluded_wrong_date,
+            'Total_Excluded_Chats':         total_excluded,
+            'CONSUMER_ONLY_CHATS_COUNT':    _fs.get('consumer_only_chats_count', 0),
             'Bot_Handled_Count': bot_data.get('bot_handled_count', 0),
             'Bot_Handled_Percentage': round(bot_data.get('bot_handled_percentage', 0), 2),
             
@@ -10480,8 +11228,15 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             # CC_Resolvers Complaint Action Metrics (Phase 2)
             'COMPLAINT_ACTION_COUNT': bot_data.get('complaint_action_count', 0),
             'COMPLAINT_ACTION_PERCENTAGE': round(bot_data.get('complaint_action_percentage', 0), 2),
+            'COMPLAINT_ACTION_WITH_0_AGENT_MESSAGES_COUNT': bot_data.get('complaint_action_with_0_agent_messages_count', 0),
+            'COMPLAINT_ACTION_WITH_0_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('complaint_action_with_0_agent_messages_percentage', 0), 2),
+            'COMPLAINT_ACTION_WITH_1_PLUS_AGENT_MESSAGES_COUNT': bot_data.get('complaint_action_with_1_plus_agent_messages_count', 0),
+            'COMPLAINT_ACTION_WITH_1_PLUS_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('complaint_action_with_1_plus_agent_messages_percentage', 0), 2),
             'CHATS_WITH_NO_BOT_MESSAGES_COUNT': bot_data.get('chats_with_no_bot_messages_count', 0),
             'CHATS_WITH_NO_BOT_MESSAGES_PERCENTAGE': round(bot_data.get('chats_with_no_bot_messages_percentage', 0), 2),
+            'BOT_HANDLED_WITH_BOT_RESPONSE_COUNT': bot_data.get('bot_handled_with_bot_response_count', 0),
+            'BOT_HANDLED_WITH_BOT_RESPONSE_PERCENTAGE': round(bot_data.get('bot_handled_with_bot_response_percentage', 0), 2),
+            'CONVERSATIONS_WITH_BOT_RESPONSE_COUNT': bot_data.get('conversations_with_bot_response_count', 0),
             
             # MV_Resolvers Proactive Agent Messages Metrics (Phase 2)
             'PROACTIVE_AGENT_MESSAGES_COUNT': bot_data.get('proactive_agent_messages_count', 0),
@@ -10510,6 +11265,8 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'DELIGHTERS_TO_SENIORS_PERCENTAGE': round(bot_data.get('delighters_to_seniors_percentage', 0), 2),
             'TOTAL_SENIORS_CALLERS_COUNT': bot_data.get('total_seniors_callers_count', 0),
             'TOTAL_SENIORS_CALLERS_PERCENTAGE': round(bot_data.get('total_seniors_callers_percentage', 0), 2),
+            'SENIORS_NO_RESPONSE_TRANSFERS_COUNT': bot_data.get('seniors_no_response_transfers_count', 0),
+            'SENIORS_NO_RESPONSE_TRANSFERS_PERCENTAGE': round(bot_data.get('seniors_no_response_transfers_percentage', 0), 2),
             'SENIORS_OUR_BOT_COUNT': bot_data.get('seniors_our_bot_count', 0),
             'SENIORS_OUR_BOT_PERCENTAGE': round(bot_data.get('seniors_our_bot_percentage', 0), 2),
             'SENIORS_DIRECTLY_HANDLED_COUNT': bot_data.get('seniors_directly_handled_count', 0),
