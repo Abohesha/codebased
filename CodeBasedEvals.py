@@ -4202,9 +4202,12 @@ def analyze_guardrail_stopped_tools(session, df, department_name, target_date):
                                     # Old structure: use args directly
                                     args_data = tool_args
                                 
-                                # Extract specific fields from args_data
+                                # Extract specific fields from args_data (check multiple variations)
                                 target_agent = args_data.get('Agent', args_data.get('agent', ''))
-                                policy_used = args_data.get('PolicyUsed', args_data.get('policy', ''))
+                                policy_used = args_data.get('PolicyUsed', 
+                                                          args_data.get('Policy_Used',
+                                                          args_data.get('policy_used', 
+                                                          args_data.get('policy', ''))))
                                 
                                 # Extract TARGET_SKILL_PER_MESSAGE, EXECUTION_ID, and MESSAGE_ID from the message row
                                 target_skill_per_message = msg.get('TARGET_SKILL_PER_MESSAGE', '')
