@@ -908,6 +908,97 @@ def analyze_conversation_metadata(df, conversation_ids):
     return metadata
 
 
+def get_mv_bot_boomerang_conv_ids(session, conversation_ids, target_date):
+    """
+    Identify MV_Resolvers "boomerang" conversations to be excluded from
+    DataFrame-based analyses (transfers / intervention / quality breakdown).
+
+    A boomerang conversation matches this ordered pattern in
+    BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS:
+        1. GPT_MV_RESOLVERS was involved (via any transfer source/target).
+        2. A LATER transfer leaves GPT_MV_RESOLVERS for a non-MV_Resolvers skill
+           (i.e., the chat was handed to another department).
+        3. An EVEN LATER transfer hands the chat back to MV_RESOLVERS_SENIORS
+           or MV_CALLERS.
+
+    These chats are kept in RESOLVERS_CHATS_BREAKDOWN and the seniors/callers
+    metrics (since they're computed via direct SQL and do not use the filtered
+    DataFrame), but are excluded from everything that flows through the
+    in-memory DataFrame.
+
+    Args:
+        session: Snowflake session
+        conversation_ids: Iterable of conversation IDs currently in scope.
+        target_date: Target date string ('YYYY-MM-DD'); the CC_TRANSFERS scan
+                     is bounded to a small window around the chat lifecycle.
+
+    Returns:
+        set: Conversation IDs to exclude.
+    """
+    if not conversation_ids:
+        return set()
+
+    # Skills that count as "still inside MV_Resolvers" — i.e. NOT another department
+    mv_internal_skills = [
+        'GPT_MV_RESOLVERS',
+        'MV_RESOLVERS_SENIORS',
+        'MV_CALLERS',
+        'Pre_R_Visa_Retention',
+        'GPT_RESOLVERS_BOT',
+        'gpt_delighters',
+    ]
+    mv_internal_skills_str = "', '".join(mv_internal_skills)
+
+    try:
+        date_obj = datetime.strptime(target_date, '%Y-%m-%d')
+        window_start = (date_obj - timedelta(days=1)).strftime('%Y-%m-%d')
+        window_end = (date_obj + timedelta(days=2)).strftime('%Y-%m-%d')
+    except Exception:
+        window_start = target_date
+        window_end = target_date
+
+    conv_ids_str = "', '".join([str(cid) for cid in conversation_ids])
+
+    query = f"""
+    WITH transfers AS (
+        SELECT
+            conversation_id,
+            transfer_time,
+            source_skill_name,
+            target_skill_name
+        FROM BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS
+        WHERE conversation_id IN ('{conv_ids_str}')
+          AND DATE(transfer_time) BETWEEN '{window_start}' AND '{window_end}'
+    ),
+    out_to_other AS (
+        -- Step 2: chat leaves GPT_MV_RESOLVERS to a non-MV skill
+        SELECT conversation_id, MIN(transfer_time) AS out_time
+        FROM transfers
+        WHERE source_skill_name = 'GPT_MV_RESOLVERS'
+          AND (
+              target_skill_name IS NULL
+              OR target_skill_name NOT IN ('{mv_internal_skills_str}')
+          )
+        GROUP BY conversation_id
+    )
+    SELECT DISTINCT t.conversation_id
+    FROM out_to_other o
+    JOIN transfers t
+      ON t.conversation_id = o.conversation_id
+     AND t.transfer_time > o.out_time
+     AND t.target_skill_name IN ('MV_RESOLVERS_SENIORS', 'MV_CALLERS')
+    """
+
+    try:
+        result_df = session.sql(query).to_pandas()
+        if result_df.empty:
+            return set()
+        return set(result_df['CONVERSATION_ID'].values)
+    except Exception as e:
+        print(f"    ⚠️  Error detecting MV_Resolvers boomerang conversations: {e}")
+        return set()
+
+
 def track_removed_conversations(session, conversation_ids, department_name, target_date, removal_stage, removal_reason, conversation_metadata, removal_details=None):
     """
     Track conversations removed at each filtration stage.
@@ -918,7 +1009,7 @@ def track_removed_conversations(session, conversation_ids, department_name, targ
         conversation_ids: List of conversation IDs removed
         department_name: Department name
         target_date: Target date
-        removal_stage: Stage where removed (engagement, null_execution_id, bot_skill, hi_bye, date)
+        removal_stage: Stage where removed (engagement, null_execution_id, bot_skill, hi_bye, mv_bot_boomerang, date)
         removal_reason: Detailed reason for removal
         conversation_metadata: Dict of metadata for each conversation
         removal_details: Optional additional details
@@ -1317,7 +1408,58 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     
     # Merge hi-bye stats into filtering_stats
     filtering_stats.update(hi_bye_stats)
-    
+
+    # ============================================================
+    # MV_Resolvers boomerang filter (NEW STAGE)
+    # ------------------------------------------------------------
+    # Remove chats where GPT_MV_RESOLVERS was involved, the chat was
+    # transferred to another department, and that department then sent it
+    # back to MV_RESOLVERS_SENIORS or MV_CALLERS. These chats stay in the
+    # Resolvers chats breakdown and Chatbot Alignment metrics (those use
+    # direct SQL, not the filtered DataFrame) but are excluded from all
+    # DataFrame-based analyses (transfers, intervention, quality metrics
+    # breakdown).
+    # ============================================================
+    boomerang_excluded_count = 0
+    if department_name == 'MV_Resolvers' and not filtered_df.empty:
+        print(f"  🔁 Checking for MV_Resolvers boomerang chats (GPT_MV_RESOLVERS → other dept → back to seniors/callers)...")
+        in_scope_conv_ids = set(filtered_df['CONVERSATION_ID'].unique())
+        boomerang_conv_ids = get_mv_bot_boomerang_conv_ids(
+            session, in_scope_conv_ids, target_date
+        )
+        boomerang_conv_ids = boomerang_conv_ids.intersection(in_scope_conv_ids)
+
+        if boomerang_conv_ids:
+            temp_df = df[df['CONVERSATION_ID'].isin(boomerang_conv_ids)]
+            boomerang_metadata = analyze_conversation_metadata(
+                temp_df, list(boomerang_conv_ids)
+            )
+
+            removed_records = track_removed_conversations(
+                session=session,
+                conversation_ids=list(boomerang_conv_ids),
+                department_name=department_name,
+                target_date=target_date,
+                removal_stage='mv_bot_boomerang',
+                removal_reason='MV_BOT_BOOMERANG',
+                conversation_metadata={
+                    cid: boomerang_metadata.get(cid, {}) for cid in boomerang_conv_ids
+                },
+                removal_details=(
+                    f"GPT_MV_RESOLVERS → other department → returned to MV_RESOLVERS_SENIORS/MV_CALLERS: "
+                    f"{len(boomerang_conv_ids)}"
+                )
+            )
+            removed_conversations_data.extend(removed_records)
+
+            filtered_df = filtered_df[~filtered_df['CONVERSATION_ID'].isin(boomerang_conv_ids)]
+            boomerang_excluded_count = len(boomerang_conv_ids)
+            print(f"    🚫 Excluded {boomerang_excluded_count} MV bot boomerang chats")
+        else:
+            print(f"    ✅ No MV bot boomerang chats found")
+
+    filtering_stats['mv_bot_boomerang_excluded'] = boomerang_excluded_count
+
     return filtered_df, filtering_stats, bot_routed_no_response, removed_conversations_data
 
 
@@ -5663,6 +5805,233 @@ def generate_tool_usage_analysis(session, department_name, target_date):
         return 0
 
 
+def compute_chat_initiation_breakdown(session, df, table_name, target_date, dept_name):
+    """
+    Compute how many conversations in the 'Chats Supposed to be Bot Handled' pool
+    were initiated by us vs by the client.
+
+    Classification logic:
+      - First message SENT_BY != 'consumer'  →  Initiated by Us
+      - First message SENT_BY == 'consumer':
+            If a broadcast (first message SENT_BY = 'system') was sent to the SAME
+            client within the 24 hours preceding the conversation's first message
+            →  Initiated by Us  (client is answering our broadcast)
+            Otherwise  →  Initiated by Client
+
+    The consumer identifier column is discovered dynamically via INFORMATION_SCHEMA.
+    If no identifier column exists the 24-hour broadcast check is skipped and
+    classification falls back to first-message SENT_BY only.
+
+    Args:
+        session:      Snowflake session
+        df:           Filtered DataFrame (the bot-handled pool, sorted by MESSAGE_SENT_TIME)
+        table_name:   Fully-qualified Snowflake table name for the department
+        target_date:  Target date string 'YYYY-MM-DD'
+        dept_name:    Department name (for logging)
+
+    Returns:
+        tuple: (chats_initiated_by_us: int, chats_initiated_by_client: int)
+    """
+    print(f"    🔍 Computing chat initiation breakdown for {dept_name}...")
+
+    if df.empty:
+        print(f"    ⚠️  Empty dataframe – returning zeros for initiation breakdown")
+        return 0, 0
+
+    # ── Step 1: Get the first message per conversation ───────────────────────
+    # df is already sorted by (CONVERSATION_ID, MESSAGE_SENT_TIME) by preprocessing
+    first_msgs = (
+        df.sort_values('MESSAGE_SENT_TIME')
+          .groupby('CONVERSATION_ID', sort=False)
+          .first()
+          .reset_index()
+    )
+
+    total = len(first_msgs)
+
+    # Classify using SENT_BY of the first message
+    us_mask = first_msgs['SENT_BY'].str.lower() != 'consumer'
+    consumer_mask = ~us_mask
+
+    initiated_by_us_ids = set(first_msgs.loc[us_mask, 'CONVERSATION_ID'])
+    consumer_initiated_ids = set(first_msgs.loc[consumer_mask, 'CONVERSATION_ID'])
+
+    # ── Step 2: Discover the consumer identifier column ──────────────────────
+    consumer_id_col = None
+    try:
+        # Handle fully-qualified table names like SCHEMA.DB.TABLE or DB.TABLE
+        raw_table = table_name.split('.')[-1].upper()
+        raw_schema = table_name.split('.')[-2].upper() if '.' in table_name else None
+
+        candidate_cols = ['CONSUMER_ID', 'CONTACT_ID', 'PHONE_NUMBER', 'CLIENT_ID', 'CUSTOMER_ID']
+        candidates_sql = ", ".join(f"'{c}'" for c in candidate_cols)
+
+        schema_filter = f"AND TABLE_SCHEMA = '{raw_schema}'" if raw_schema else ""
+        col_query = f"""
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = '{raw_table}'
+        {schema_filter}
+        AND COLUMN_NAME IN ({candidates_sql})
+        ORDER BY CASE COLUMN_NAME
+            WHEN 'CONSUMER_ID'   THEN 1
+            WHEN 'CONTACT_ID'    THEN 2
+            WHEN 'PHONE_NUMBER'  THEN 3
+            WHEN 'CLIENT_ID'     THEN 4
+            WHEN 'CUSTOMER_ID'   THEN 5
+            ELSE 6
+        END
+        LIMIT 1
+        """
+        col_result = session.sql(col_query).collect()
+        if col_result:
+            consumer_id_col = col_result[0]['COLUMN_NAME']
+            print(f"    ✅ Consumer identifier column found: {consumer_id_col}")
+        else:
+            print(f"    ⚠️  No consumer identifier column found in {table_name}. "
+                  f"24-hour broadcast check will be skipped.")
+    except Exception as e:
+        print(f"    ⚠️  Could not query INFORMATION_SCHEMA: {e}. "
+              f"24-hour broadcast check will be skipped.")
+
+    # ── Step 3: 24-hour broadcast re-classification ───────────────────────────
+    if consumer_id_col and consumer_initiated_ids:
+        try:
+            from datetime import datetime, timedelta
+
+            # We need broadcasts from target_date-1 and target_date
+            filter_date     = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+            prev_filter_date = (datetime.strptime(target_date, '%Y-%m-%d')).strftime('%Y-%m-%d')
+
+            # Build a single SQL query:
+            # Get the first message time per conversation for the two-day window,
+            # keeping only conversations whose first message is SENT_BY = 'system'
+            # (i.e. broadcast conversations), along with the consumer identifier.
+            broadcast_query = f"""
+            WITH ranked AS (
+                SELECT
+                    CONVERSATION_ID,
+                    {consumer_id_col},
+                    MESSAGE_SENT_TIME,
+                    SENT_BY,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY CONVERSATION_ID
+                        ORDER BY MESSAGE_SENT_TIME ASC
+                    ) AS rn
+                FROM {table_name}
+                WHERE DATE(UPDATED_AT) IN ('{filter_date}', '{prev_filter_date}')
+            )
+            SELECT
+                CONVERSATION_ID,
+                {consumer_id_col} AS CONSUMER_KEY,
+                MESSAGE_SENT_TIME AS BROADCAST_TIME
+            FROM ranked
+            WHERE rn = 1
+              AND LOWER(SENT_BY) = 'system'
+            """
+            broadcast_df = session.sql(broadcast_query).to_pandas()
+
+            if not broadcast_df.empty:
+                # Build lookup: consumer_key → list of broadcast times
+                broadcast_df['BROADCAST_TIME'] = pd.to_datetime(broadcast_df['BROADCAST_TIME'])
+                broadcast_map = broadcast_df.groupby('CONSUMER_KEY')['BROADCAST_TIME'].apply(list).to_dict()
+
+                # For each consumer-initiated conversation, check 24-hour window
+                # We need the consumer_id and first message time from our filtered_df
+                first_msgs_consumer = first_msgs[first_msgs['CONVERSATION_ID'].isin(consumer_initiated_ids)].copy()
+
+                if consumer_id_col in first_msgs_consumer.columns:
+                    first_msgs_consumer['MESSAGE_SENT_TIME'] = pd.to_datetime(first_msgs_consumer['MESSAGE_SENT_TIME'])
+
+                    reclassified_ids = set()
+                    for _, row in first_msgs_consumer.iterrows():
+                        c_key = row.get(consumer_id_col)
+                        if c_key is None or (isinstance(c_key, float) and pd.isna(c_key)):
+                            continue
+                        conv_start = row['MESSAGE_SENT_TIME']
+                        broadcast_times = broadcast_map.get(c_key, [])
+                        for bt in broadcast_times:
+                            if pd.Timestamp(conv_start) - pd.Timedelta(hours=24) <= pd.Timestamp(bt) < pd.Timestamp(conv_start):
+                                reclassified_ids.add(row['CONVERSATION_ID'])
+                                break
+
+                    initiated_by_us_ids.update(reclassified_ids)
+                    consumer_initiated_ids -= reclassified_ids
+                    print(f"    🔄 Re-classified {len(reclassified_ids)} consumer-started chat(s) as 'Initiated by Us' "
+                          f"(broadcast within 24h found)")
+                else:
+                    print(f"    ⚠️  Column '{consumer_id_col}' not present in filtered_df rows; "
+                          f"broadcast re-classification skipped.")
+            else:
+                print(f"    ℹ️  No broadcast conversations found in the 24-hour window.")
+
+        except Exception as e:
+            print(f"    ⚠️  Broadcast check failed: {e}. Results based on first-message SENT_BY only.")
+
+    chats_initiated_by_us     = len(initiated_by_us_ids)
+    chats_initiated_by_client = len(consumer_initiated_ids)
+
+    # ── Step 4: Validation print ──────────────────────────────────────────────
+    sum_check = chats_initiated_by_us + chats_initiated_by_client
+    checkmark = '✓' if sum_check == total else '✗  ← MISMATCH!'
+    print(f"\n    ═══════════════════════════════════════════════")
+    print(f"    [INITIATION BREAKDOWN - {dept_name}]")
+    print(f"      Consumer ID column used : {consumer_id_col or 'NONE (no 24h broadcast check)'}")
+    print(f"      Total supposed-to-be-bot-handled : {total}")
+    print(f"      Initiated by Us         : {chats_initiated_by_us}")
+    print(f"      Initiated by Client     : {chats_initiated_by_client}")
+    print(f"      Sum check: {sum_check} == {total}  {checkmark}")
+    print(f"    ═══════════════════════════════════════════════\n")
+
+    # ── Step 5: Save per-conversation raw data to Snowflake ───────────────────
+    try:
+        raw_rows = []
+        for conv_id in initiated_by_us_ids:
+            raw_rows.append({
+                'CONVERSATION_ID': conv_id,
+                'INITIATION_TYPE': 'Initiated by Us',
+                'BROADCAST_RECLASSIFIED': False
+            })
+        for conv_id in consumer_initiated_ids:
+            raw_rows.append({
+                'CONVERSATION_ID': conv_id,
+                'INITIATION_TYPE': 'Initiated by Client',
+                'BROADCAST_RECLASSIFIED': False
+            })
+
+        # Mark conversations that were re-classified due to broadcast (only
+        # populated when a consumer_id_col was found and re-classification ran)
+        if consumer_id_col:
+            # reclassified_ids was set inside the broadcast block above;
+            # re-derive it from the data we already have: any conv that has
+            # first message SENT_BY == 'consumer' but ended up in
+            # initiated_by_us_ids was broadcast-reclassified.
+            consumer_first_ids = set(
+                first_msgs.loc[first_msgs['SENT_BY'].str.lower() == 'consumer', 'CONVERSATION_ID']
+            )
+            broadcast_reclassified = initiated_by_us_ids & consumer_first_ids
+            for row in raw_rows:
+                if row['CONVERSATION_ID'] in broadcast_reclassified:
+                    row['BROADCAST_RECLASSIFIED'] = True
+
+        if raw_rows:
+            raw_df = pd.DataFrame(raw_rows)
+            columns = ['CONVERSATION_ID', 'INITIATION_TYPE', 'BROADCAST_RECLASSIFIED']
+            insert_raw_data_with_cleanup(
+                session=session,
+                table_name='CHAT_INITIATION_RAW_DATA',
+                department=dept_name,
+                target_date=target_date,
+                dataframe=raw_df[columns],
+                columns=columns
+            )
+            print(f"    💾 Saved {len(raw_rows)} rows to CHAT_INITIATION_RAW_DATA")
+    except Exception as e:
+        print(f"    ⚠️  Failed to save CHAT_INITIATION_RAW_DATA: {e}")
+
+    return chats_initiated_by_us, chats_initiated_by_client
+
+
 def analyze_bot_handled_conversations_single_department(session, df, department_name, departments_config, target_date):
     """
     Analyze bot-handled conversations for a single department and save raw data.
@@ -5842,7 +6211,9 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'tech_error_transfers_count': tech_error_transfers_count,
             'tech_error_transfers_percentage': 0.0,
              'mcd_mv_transfer_count': 0,
-            'mcd_cc_transfer_count': 0
+            'mcd_cc_transfer_count': 0,
+            'chats_initiated_by_us_count': 0,
+            'chats_initiated_by_client_count': 0
         }
         
     
@@ -5852,6 +6223,13 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     
     # Get unique conversation IDs from the bot-handled df (chats supposed to be bot-handled)
     bot_handled_conv_ids = set(df['CONVERSATION_ID'].unique())
+
+    # ── Chat initiation breakdown (Initiated by Us vs Initiated by Client) ──
+    dept_config = departments_config.get(department_name, {})
+    _table_name = dept_config.get('table_name', '')
+    chats_initiated_by_us_count, chats_initiated_by_client_count = compute_chat_initiation_breakdown(
+        session, df, _table_name, target_date, department_name
+    )
     
     bot_handled_conversations_data = []
     bot_handled_count = 0
@@ -6297,7 +6675,9 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'tech_error_transfers_count': tech_error_transfers_count,
         'tech_error_transfers_percentage': tech_error_transfers_percentage,
         'mcd_mv_transfer_count': mcd_mv_transfer_count,
-        'mcd_cc_transfer_count': mcd_cc_transfer_count
+        'mcd_cc_transfer_count': mcd_cc_transfer_count,
+        'chats_initiated_by_us_count': chats_initiated_by_us_count,
+        'chats_initiated_by_client_count': chats_initiated_by_client_count
     }
     
     print(f"    ✅ {bot_handled_count}/{total_conversations} ({bot_handled_percentage:.1f}%) bot-handled")
@@ -7812,6 +8192,8 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'Similarity_Percentage': None,
             'Avg_Similarity_Score': None,
             'Chats_Supposed_to_be_Bot_Handled': None,
+            'CHATS_INITIATED_BY_US':     None,
+            'CHATS_INITIATED_BY_CLIENT': None,
             
             # Analysis Metadata
             'Analysis_Date': datetime.now().strftime('%Y-%m-%d'),
@@ -7982,6 +8364,8 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'Department': 'VARCHAR(100)',
                 'Total_Conversations': 'NUMBER',
                 'Chats_Supposed_to_be_Bot_Handled': 'NUMBER',
+                'CHATS_INITIATED_BY_US': 'NUMBER',
+                'CHATS_INITIATED_BY_CLIENT': 'NUMBER',
                 'Excluded_No_Engagement_Chats': 'NUMBER',
                 'Excluded_No_Bot_Skill_Chats': 'NUMBER',
                 'Excluded_Hi_Bye_Chats': 'NUMBER',
@@ -8192,6 +8576,8 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'TRANSFERRED_CONVERSATION_COUNT':'NUMBER',
                 'MCD_MV_TRANSFER_COUNT':         'NUMBER',
                 'MCD_CC_TRANSFER_COUNT':         'NUMBER',
+                'CHATS_INITIATED_BY_US':         'NUMBER',
+                'CHATS_INITIATED_BY_CLIENT':     'NUMBER',
             }
             for df_col, col_type in new_col_type_map.items():
                 if df_col.upper() not in table_columns_upper and df_col in new_metrics_df.columns:
@@ -11189,6 +11575,9 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             # Bot Handling Metrics (Phase 2)
             'Total_Conversations': conversations_without_filter_5_data.get('total_conversations', 0),
             'Chats_Supposed_to_be_Bot_Handled': bot_data.get('total_conversations', 0),
+            # Initiation breakdown: how the chats in Chats_Supposed_to_be_Bot_Handled were started
+            'CHATS_INITIATED_BY_US':     bot_data.get('chats_initiated_by_us_count', 0),
+            'CHATS_INITIATED_BY_CLIENT': bot_data.get('chats_initiated_by_client_count', 0),
             # Exclusion breakdown: chats removed on the way from ChatCC to Chats_Supposed_to_be_Bot_Handled
             'Excluded_No_Engagement_Chats': excluded_no_engagement,
             'Excluded_No_Bot_Skill_Chats':  excluded_no_bot_skill,
