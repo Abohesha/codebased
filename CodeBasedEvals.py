@@ -3082,6 +3082,38 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         return 0, 0, 0, 0, 0, 0, 0, set(), set(), 0, 0, 0, set(), 0
 
 
+def calculate_wrong_number_clients(session, target_date):
+    """
+    Count unique clients (by USER_PHONE_NUMBER) who received the wrong-number
+    redirect message from MV_Resolvers on the given target_date.
+
+    The redirect message is identified by the unique phrase:
+    'no longer able to receive or review messages on this number'
+
+    Args:
+        session: Snowflake session
+        target_date: Target date string (YYYY-MM-DD)
+
+    Returns:
+        int: Number of distinct phone numbers that received the redirect message
+    """
+    filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+    try:
+        q = f"""
+        SELECT COUNT(DISTINCT USER_PHONE_NUMBER) AS WRONG_NUMBER_CLIENTS_COUNT
+        FROM SILVER.CHAT_EVALS.MV_CLIENTS_CHATS
+        WHERE DATE(UPDATED_AT) = DATE('{filter_date}')
+          AND UPPER(TEXT) LIKE '%NO LONGER ABLE TO RECEIVE OR REVIEW MESSAGES ON THIS NUMBER%'
+        """
+        result = session.sql(q).collect()
+        count = int(result[0]['WRONG_NUMBER_CLIENTS_COUNT']) if result else 0
+        print(f"    📵 Wrong number clients (unique phone numbers): {count}")
+        return count
+    except Exception as e:
+        print(f"    ⚠️  Error calculating wrong number clients: {str(e)}")
+        return 0
+
+
 def store_resolvers_chats_breakdown(session, department_name, departments_config, target_date):
     """
     Store detailed breakdown of all conversations that reached MV_Resolvers seniors in a raw table.
@@ -3537,6 +3569,142 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
         import traceback
         traceback.print_exc()
         return 0
+
+
+def get_mv_message_delay_chats(session, target_date):
+    """
+    Identify MV Resolvers chats where:
+      1. The client (consumer) initiated the chat (first message SENT_BY == 'consumer').
+      2. The client sent at least 2 consecutive messages at the very start of the chat
+         (the first AND second messages, ordered by MESSAGE_SENT_TIME, are both from
+         the consumer — i.e. no bot/agent reply in between).
+      3. The time gap between the 2nd and 1st client message exceeds 50 seconds.
+
+    Data is loaded directly from SILVER.CHAT_EVALS.MV_CLIENTS_CHATS without applying
+    Phase 1 engagement filters, so that hi-bye / boomerang-excluded chats are still
+    captured and the count reflects the true frequency of the pattern.
+
+    Args:
+        session:     Snowflake Snowpark session.
+        target_date: Date string 'YYYY-MM-DD'.  Messages are loaded by
+                     DATE(UPDATED_AT) = target_date + 1 day (standard pattern).
+
+    Returns:
+        pd.DataFrame with columns:
+            CONVERSATION_ID   – chat identifier
+            DATE              – target_date string
+            TIME_DIFF_SECONDS – gap (float) between the 1st and 2nd client message
+    """
+    print(f"\n📊 [get_mv_message_delay_chats] Loading MV_CLIENTS_CHATS for target_date={target_date} ...")
+
+    try:
+        filter_date = (
+            datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)
+        ).strftime('%Y-%m-%d')
+
+        query = f"""
+            SELECT CONVERSATION_ID, MESSAGE_SENT_TIME, SENT_BY
+            FROM SILVER.CHAT_EVALS.MV_CLIENTS_CHATS
+            WHERE DATE(UPDATED_AT) = '{filter_date}'
+        """
+        df = session.sql(query).to_pandas()
+
+        if df.empty:
+            print(f"  ⚠️  No rows returned for filter_date={filter_date}.")
+            return pd.DataFrame(columns=['CONVERSATION_ID', 'DATE', 'TIME_DIFF_SECONDS'])
+
+        # Normalise
+        df['MESSAGE_SENT_TIME'] = pd.to_datetime(df['MESSAGE_SENT_TIME'], errors='coerce')
+        df['SENT_BY_LOWER'] = df['SENT_BY'].astype(str).str.lower().str.strip()
+        df = df.dropna(subset=['MESSAGE_SENT_TIME'])
+        df = df.sort_values(['CONVERSATION_ID', 'MESSAGE_SENT_TIME']).reset_index(drop=True)
+
+        qualifying_rows = []
+
+        for conv_id, conv_df in df.groupby('CONVERSATION_ID', sort=False):
+            msgs = conv_df.sort_values('MESSAGE_SENT_TIME').reset_index(drop=True)
+
+            if len(msgs) < 2:
+                continue
+
+            first_sent_by  = msgs.loc[0, 'SENT_BY_LOWER']
+            second_sent_by = msgs.loc[1, 'SENT_BY_LOWER']
+
+            # Condition 1 & 2: both the first and second messages must be from the consumer
+            if first_sent_by != 'consumer' or second_sent_by != 'consumer':
+                continue
+
+            # Condition 3: time gap > 50 seconds
+            time_diff = (
+                msgs.loc[1, 'MESSAGE_SENT_TIME'] - msgs.loc[0, 'MESSAGE_SENT_TIME']
+            ).total_seconds()
+
+            if time_diff > 50:
+                qualifying_rows.append({
+                    'CONVERSATION_ID':   conv_id,
+                    'DATE':              target_date,
+                    'TIME_DIFF_SECONDS': round(time_diff, 2),
+                })
+
+        result_df = pd.DataFrame(qualifying_rows, columns=['CONVERSATION_ID', 'DATE', 'TIME_DIFF_SECONDS'])
+        print(f"  ✅ {len(result_df)} qualifying chats found (out of {df['CONVERSATION_ID'].nunique()} total conversations).")
+        return result_df
+
+    except Exception as e:
+        print(f"  ❌ Error in get_mv_message_delay_chats: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame(columns=['CONVERSATION_ID', 'DATE', 'TIME_DIFF_SECONDS'])
+
+
+def run_mv_message_delay_analysis(session, target_dates, department='MV_Resolvers', target_table='MV_MESSAGE_DELAY_CHATS'):
+    """
+    Orchestrate get_mv_message_delay_chats across multiple dates, save each
+    date's qualifying chats to Snowflake, and return the combined DataFrame.
+
+    Args:
+        session:      Snowflake Snowpark session.
+        target_dates: List of date strings 'YYYY-MM-DD' (typically 3 days).
+        department:   Department label written into the Snowflake table.
+        target_table: Snowflake table name (created automatically if absent).
+
+    Returns:
+        pd.DataFrame with columns CONVERSATION_ID, DATE, TIME_DIFF_SECONDS.
+    """
+    print(f"\n📊 AVERAGE MESSAGE DELAY ANALYSIS — {department}")
+    print(f"   Dates: {target_dates}")
+    print(f"   Target table: LLM_EVAL.PUBLIC.{target_table}")
+
+    all_results = []
+    for date in target_dates:
+        df_date = get_mv_message_delay_chats(session, date)
+        print(f"  [{date}]  {len(df_date)} qualifying chat(s)")
+
+        if not df_date.empty:
+            payload = df_date[['CONVERSATION_ID', 'TIME_DIFF_SECONDS']].copy()
+            insert_raw_data_with_cleanup(
+                session,
+                table_name=target_table,
+                department=department,
+                target_date=date,
+                dataframe=payload,
+                columns=['CONVERSATION_ID', 'TIME_DIFF_SECONDS'],
+            )
+        else:
+            print(f"    (no rows to write for {date})")
+
+        all_results.append(df_date)
+
+    results_df = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame(
+        columns=['CONVERSATION_ID', 'DATE', 'TIME_DIFF_SECONDS']
+    )
+
+    print(f"\nTotal qualifying chats across {len(target_dates)} day(s): {len(results_df)}")
+    if not results_df.empty:
+        print("\nBreakdown by day:")
+        print(results_df.groupby('DATE')['CONVERSATION_ID'].count().rename('chat_count').to_string())
+    print(f"\nData saved to Snowflake table: LLM_EVAL.PUBLIC.{target_table}")
+    return results_df
 
 
 def calculate_transfers_due_to_tech_error(session, department_name, departments_config, target_date):
@@ -6078,6 +6246,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     our_bot_to_seniors_conv_ids = set()
     total_guardrail_count = 0
     guardrail_agent_count = 0
+    wrong_number_clients_count = 0
     # MV_RESOLVERS PROACTIVE AGENT METRICS DISABLED
     if department_name == 'MV_Resolvers':
         # Calculate sub-metrics (WHY breakdown and WHERE breakdown)
@@ -6093,6 +6262,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         store_resolvers_chats_breakdown(
             session, department_name, departments_config, target_date
         )
+        # MV_Resolvers specific: Count unique clients who were redirected via wrong-number message
+        wrong_number_clients_count = calculate_wrong_number_clients(session, target_date)
     #     
     #     # OVERRIDE the old metrics with the new breakdown from seniors/callers (to avoid confusion)
         our_bot_to_seniors_count = seniors_our_bot_count
@@ -6213,7 +6384,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
              'mcd_mv_transfer_count': 0,
             'mcd_cc_transfer_count': 0,
             'chats_initiated_by_us_count': 0,
-            'chats_initiated_by_client_count': 0
+            'chats_initiated_by_client_count': 0,
+            'wrong_number_clients_count': wrong_number_clients_count
         }
         
     
@@ -6677,7 +6849,8 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'mcd_mv_transfer_count': mcd_mv_transfer_count,
         'mcd_cc_transfer_count': mcd_cc_transfer_count,
         'chats_initiated_by_us_count': chats_initiated_by_us_count,
-        'chats_initiated_by_client_count': chats_initiated_by_client_count
+        'chats_initiated_by_client_count': chats_initiated_by_client_count,
+        'wrong_number_clients_count': wrong_number_clients_count
     }
     
     print(f"    ✅ {bot_handled_count}/{total_conversations} ({bot_handled_percentage:.1f}%) bot-handled")
@@ -8455,6 +8628,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'SENIORS_OTHER_BOTS_COUNT': 'NUMBER',
                 'SENIORS_OTHER_BOTS_PERCENTAGE': 'FLOAT',
                 'UNIQUE_UNION_COUNT': 'NUMBER',
+                'WRONG_NUMBER_CLIENTS_COUNT': 'NUMBER',
                 'TOTAL_GUARDRAIL_COUNT': 'NUMBER',
                 'TOTAL_GUARDRAIL_PERCENTAGE': 'FLOAT',
                 'GUARDRAIL_AGENT_COUNT': 'NUMBER',
@@ -8578,6 +8752,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'MCD_CC_TRANSFER_COUNT':         'NUMBER',
                 'CHATS_INITIATED_BY_US':         'NUMBER',
                 'CHATS_INITIATED_BY_CLIENT':     'NUMBER',
+                'WRONG_NUMBER_CLIENTS_COUNT':    'NUMBER',
             }
             for df_col, col_type in new_col_type_map.items():
                 if df_col.upper() not in table_columns_upper and df_col in new_metrics_df.columns:
@@ -11678,6 +11853,7 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'SENIORS_OTHER_BOTS_COUNT': bot_data.get('seniors_other_bots_count', 0),
             'SENIORS_OTHER_BOTS_PERCENTAGE': round(bot_data.get('seniors_other_bots_percentage', 0), 2),
             'UNIQUE_UNION_COUNT': bot_data.get('unique_union_count', 0),
+            'WRONG_NUMBER_CLIENTS_COUNT': bot_data.get('wrong_number_clients_count', 0),
             'TOTAL_GUARDRAIL_COUNT': bot_data.get('total_guardrail_count', 0),
             'TOTAL_GUARDRAIL_PERCENTAGE': round(bot_data.get('total_guardrail_percentage', 0), 2),
             'GUARDRAIL_AGENT_COUNT': bot_data.get('guardrail_agent_count', 0),
