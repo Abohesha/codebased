@@ -2207,12 +2207,12 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     
     # Return tuple: (is_bot_handled, agent_message_count, has_call_request, counted_agent_messages, bot_message_count, is_bot_handled_excluding_fillers, has_valid_system_transfer, agent_message_count_excluding_pokes, agent_messages_from_allowed_skills, has_complaint_action)
     # For CC_Resolvers: 
-    #   - if has_complaint_action is True, conversation is NOT bot-handled regardless of agent_message_count
     #   - bot must have sent at least 1 normal message (bot_message_count > 0) to be considered handled
+    #   - Open Complaint + 0 agent messages = HANDLED (business requirement)
     # For other departments: only check agent_message_count == 0
     if department_name == 'CC_Resolvers':
-        is_bot_handled = (agent_message_count == 0) and not has_complaint_action and (bot_message_count > 0)
-        is_bot_handled_excluding_fillers = (counted_agent_messages == 0) and not has_complaint_action and (bot_message_count > 0)
+        is_bot_handled = (agent_message_count == 0) and (bot_message_count > 0)
+        is_bot_handled_excluding_fillers = (counted_agent_messages == 0) and (bot_message_count > 0)
     else:
         is_bot_handled = (agent_message_count == 0)
         is_bot_handled_excluding_fillers = (counted_agent_messages == 0)
@@ -4547,7 +4547,8 @@ def analyze_guardrail_missed_tools(session, df, department_name, target_date):
                 message_time = msg['MESSAGE_SENT_TIME']
                 message_id = msg['MESSAGE_ID'] if 'MESSAGE_ID' in msg else ''
                 target_skill = msg['TARGET_SKILL_PER_MESSAGE'] if 'TARGET_SKILL_PER_MESSAGE' in msg else ''
-                execution_id = msg['EXECUTION_ID'] if 'EXECUTION_ID' in msg else ''
+                # Don't get EXECUTION_ID from guardrail message - will find it from GPT response message later
+                execution_id = ''
                 
                 # Determine missed tool type from the message
                 if 'FALSE PROMISE' in message_text.upper():
@@ -4570,6 +4571,23 @@ def analyze_guardrail_missed_tools(session, df, department_name, target_date):
                 )
                 if gpt_response_match:
                     gpt_response_caught = gpt_response_match.group(1).strip()
+                    
+                    # Try to find the actual GPT response message in the conversation to get EXECUTION_ID
+                    # Search for messages that contain this GPT response content
+                    conv_messages = df[df['CONVERSATION_ID'] == conv_id]
+                    for _, response_msg in conv_messages.iterrows():
+                        try:
+                            response_text = response_msg.get('TEXT', '')
+                            # Check if this message contains part of the GPT response
+                            # (use first 100 chars to avoid issues with formatting differences)
+                            gpt_response_sample = gpt_response_caught[:100].strip()
+                            if gpt_response_sample and gpt_response_sample in response_text:
+                                # Found the GPT response message - extract EXECUTION_ID
+                                execution_id = response_msg.get('EXECUTION_ID', '')
+                                if execution_id:
+                                    break
+                        except:
+                            continue
                 
                 # Extract Last Customer Message (between "LAST CUSTOMER MESSAGE:" and "Guardrail Output:")
                 customer_msg_match = re.search(
