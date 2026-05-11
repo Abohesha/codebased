@@ -908,6 +908,97 @@ def analyze_conversation_metadata(df, conversation_ids):
     return metadata
 
 
+def get_mv_bot_boomerang_conv_ids(session, conversation_ids, target_date):
+    """
+    Identify MV_Resolvers "boomerang" conversations to be excluded from
+    DataFrame-based analyses (transfers / intervention / quality breakdown).
+
+    A boomerang conversation matches this ordered pattern in
+    BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS:
+        1. GPT_MV_RESOLVERS was involved (via any transfer source/target).
+        2. A LATER transfer leaves GPT_MV_RESOLVERS for a non-MV_Resolvers skill
+           (i.e., the chat was handed to another department).
+        3. An EVEN LATER transfer hands the chat back to MV_RESOLVERS_SENIORS
+           or MV_CALLERS.
+
+    These chats are kept in RESOLVERS_CHATS_BREAKDOWN and the seniors/callers
+    metrics (since they're computed via direct SQL and do not use the filtered
+    DataFrame), but are excluded from everything that flows through the
+    in-memory DataFrame.
+
+    Args:
+        session: Snowflake session
+        conversation_ids: Iterable of conversation IDs currently in scope.
+        target_date: Target date string ('YYYY-MM-DD'); the CC_TRANSFERS scan
+                     is bounded to a small window around the chat lifecycle.
+
+    Returns:
+        set: Conversation IDs to exclude.
+    """
+    if not conversation_ids:
+        return set()
+
+    # Skills that count as "still inside MV_Resolvers" — i.e. NOT another department
+    mv_internal_skills = [
+        'GPT_MV_RESOLVERS',
+        'MV_RESOLVERS_SENIORS',
+        'MV_CALLERS',
+        'Pre_R_Visa_Retention',
+        'GPT_RESOLVERS_BOT',
+        'gpt_delighters',
+    ]
+    mv_internal_skills_str = "', '".join(mv_internal_skills)
+
+    try:
+        date_obj = datetime.strptime(target_date, '%Y-%m-%d')
+        window_start = (date_obj - timedelta(days=1)).strftime('%Y-%m-%d')
+        window_end = (date_obj + timedelta(days=2)).strftime('%Y-%m-%d')
+    except Exception:
+        window_start = target_date
+        window_end = target_date
+
+    conv_ids_str = "', '".join([str(cid) for cid in conversation_ids])
+
+    query = f"""
+    WITH transfers AS (
+        SELECT
+            conversation_id,
+            transfer_time,
+            source_skill_name,
+            target_skill_name
+        FROM BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS
+        WHERE conversation_id IN ('{conv_ids_str}')
+          AND DATE(transfer_time) BETWEEN '{window_start}' AND '{window_end}'
+    ),
+    out_to_other AS (
+        -- Step 2: chat leaves GPT_MV_RESOLVERS to a non-MV skill
+        SELECT conversation_id, MIN(transfer_time) AS out_time
+        FROM transfers
+        WHERE source_skill_name = 'GPT_MV_RESOLVERS'
+          AND (
+              target_skill_name IS NULL
+              OR target_skill_name NOT IN ('{mv_internal_skills_str}')
+          )
+        GROUP BY conversation_id
+    )
+    SELECT DISTINCT t.conversation_id
+    FROM out_to_other o
+    JOIN transfers t
+      ON t.conversation_id = o.conversation_id
+     AND t.transfer_time > o.out_time
+     AND t.target_skill_name IN ('MV_RESOLVERS_SENIORS', 'MV_CALLERS')
+    """
+
+    try:
+        result_df = session.sql(query).to_pandas()
+        if result_df.empty:
+            return set()
+        return set(result_df['CONVERSATION_ID'].values)
+    except Exception as e:
+        print(f"    ⚠️  Error detecting MV_Resolvers boomerang conversations: {e}")
+        return set()
+
+
 def track_removed_conversations(session, conversation_ids, department_name, target_date, removal_stage, removal_reason, conversation_metadata, removal_details=None):
     """
     Track conversations removed at each filtration stage.
@@ -918,7 +1009,7 @@ def track_removed_conversations(session, conversation_ids, department_name, targ
         conversation_ids: List of conversation IDs removed
         department_name: Department name
         target_date: Target date
-        removal_stage: Stage where removed (engagement, null_execution_id, bot_skill, hi_bye, date)
+        removal_stage: Stage where removed (engagement, null_execution_id, bot_skill, hi_bye, mv_bot_boomerang, date)
         removal_reason: Detailed reason for removal
         conversation_metadata: Dict of metadata for each conversation
         removal_details: Optional additional details
@@ -1317,7 +1408,58 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     
     # Merge hi-bye stats into filtering_stats
     filtering_stats.update(hi_bye_stats)
-    
+
+    # ============================================================
+    # MV_Resolvers boomerang filter (NEW STAGE)
+    # ------------------------------------------------------------
+    # Remove chats where GPT_MV_RESOLVERS was involved, the chat was
+    # transferred to another department, and that department then sent it
+    # back to MV_RESOLVERS_SENIORS or MV_CALLERS. These chats stay in the
+    # Resolvers chats breakdown and Chatbot Alignment metrics (those use
+    # direct SQL, not the filtered DataFrame) but are excluded from all
+    # DataFrame-based analyses (transfers, intervention, quality metrics
+    # breakdown).
+    # ============================================================
+    boomerang_excluded_count = 0
+    if department_name == 'MV_Resolvers' and not filtered_df.empty:
+        print(f"  🔁 Checking for MV_Resolvers boomerang chats (GPT_MV_RESOLVERS → other dept → back to seniors/callers)...")
+        in_scope_conv_ids = set(filtered_df['CONVERSATION_ID'].unique())
+        boomerang_conv_ids = get_mv_bot_boomerang_conv_ids(
+            session, in_scope_conv_ids, target_date
+        )
+        boomerang_conv_ids = boomerang_conv_ids.intersection(in_scope_conv_ids)
+
+        if boomerang_conv_ids:
+            temp_df = df[df['CONVERSATION_ID'].isin(boomerang_conv_ids)]
+            boomerang_metadata = analyze_conversation_metadata(
+                temp_df, list(boomerang_conv_ids)
+            )
+
+            removed_records = track_removed_conversations(
+                session=session,
+                conversation_ids=list(boomerang_conv_ids),
+                department_name=department_name,
+                target_date=target_date,
+                removal_stage='mv_bot_boomerang',
+                removal_reason='MV_BOT_BOOMERANG',
+                conversation_metadata={
+                    cid: boomerang_metadata.get(cid, {}) for cid in boomerang_conv_ids
+                },
+                removal_details=(
+                    f"GPT_MV_RESOLVERS → other department → returned to MV_RESOLVERS_SENIORS/MV_CALLERS: "
+                    f"{len(boomerang_conv_ids)}"
+                )
+            )
+            removed_conversations_data.extend(removed_records)
+
+            filtered_df = filtered_df[~filtered_df['CONVERSATION_ID'].isin(boomerang_conv_ids)]
+            boomerang_excluded_count = len(boomerang_conv_ids)
+            print(f"    🚫 Excluded {boomerang_excluded_count} MV bot boomerang chats")
+        else:
+            print(f"    ✅ No MV bot boomerang chats found")
+
+    filtering_stats['mv_bot_boomerang_excluded'] = boomerang_excluded_count
+
     return filtered_df, filtering_stats, bot_routed_no_response, removed_conversations_data
 
 
@@ -2065,12 +2207,12 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     
     # Return tuple: (is_bot_handled, agent_message_count, has_call_request, counted_agent_messages, bot_message_count, is_bot_handled_excluding_fillers, has_valid_system_transfer, agent_message_count_excluding_pokes, agent_messages_from_allowed_skills, has_complaint_action)
     # For CC_Resolvers: 
-    #   - if has_complaint_action is True, conversation is NOT bot-handled regardless of agent_message_count
     #   - bot must have sent at least 1 normal message (bot_message_count > 0) to be considered handled
+    #   - Open Complaint + 0 agent messages = HANDLED (business requirement)
     # For other departments: only check agent_message_count == 0
     if department_name == 'CC_Resolvers':
-        is_bot_handled = (agent_message_count == 0) and not has_complaint_action and (bot_message_count > 0)
-        is_bot_handled_excluding_fillers = (counted_agent_messages == 0) and not has_complaint_action and (bot_message_count > 0)
+        is_bot_handled = (agent_message_count == 0) and (bot_message_count > 0)
+        is_bot_handled_excluding_fillers = (counted_agent_messages == 0) and (bot_message_count > 0)
     else:
         is_bot_handled = (agent_message_count == 0)
         is_bot_handled_excluding_fillers = (counted_agent_messages == 0)
@@ -4060,9 +4202,12 @@ def analyze_guardrail_stopped_tools(session, df, department_name, target_date):
                                     # Old structure: use args directly
                                     args_data = tool_args
                                 
-                                # Extract specific fields from args_data
+                                # Extract specific fields from args_data (check multiple variations)
                                 target_agent = args_data.get('Agent', args_data.get('agent', ''))
-                                policy_used = args_data.get('PolicyUsed', args_data.get('policy', ''))
+                                policy_used = args_data.get('PolicyUsed', 
+                                                          args_data.get('Policy_Used',
+                                                          args_data.get('policy_used', 
+                                                          args_data.get('policy', ''))))
                                 
                                 # Extract TARGET_SKILL_PER_MESSAGE, EXECUTION_ID, and MESSAGE_ID from the message row
                                 target_skill_per_message = msg.get('TARGET_SKILL_PER_MESSAGE', '')
@@ -4234,7 +4379,8 @@ def analyze_guardrail_missed_tools(session, df, department_name, target_date):
                 message_time = msg['MESSAGE_SENT_TIME']
                 message_id = msg['MESSAGE_ID'] if 'MESSAGE_ID' in msg else ''
                 target_skill = msg['TARGET_SKILL_PER_MESSAGE'] if 'TARGET_SKILL_PER_MESSAGE' in msg else ''
-                execution_id = msg['EXECUTION_ID'] if 'EXECUTION_ID' in msg else ''
+                # Don't get EXECUTION_ID from guardrail message - will find it from GPT response message later
+                execution_id = ''
                 
                 # Determine missed tool type from the message
                 if 'FALSE PROMISE' in message_text.upper():
@@ -4257,6 +4403,23 @@ def analyze_guardrail_missed_tools(session, df, department_name, target_date):
                 )
                 if gpt_response_match:
                     gpt_response_caught = gpt_response_match.group(1).strip()
+                    
+                    # Try to find the actual GPT response message in the conversation to get EXECUTION_ID
+                    # Search for messages that contain this GPT response content
+                    conv_messages = df[df['CONVERSATION_ID'] == conv_id]
+                    for _, response_msg in conv_messages.iterrows():
+                        try:
+                            response_text = response_msg.get('TEXT', '')
+                            # Check if this message contains part of the GPT response
+                            # (use first 100 chars to avoid issues with formatting differences)
+                            gpt_response_sample = gpt_response_caught[:100].strip()
+                            if gpt_response_sample and gpt_response_sample in response_text:
+                                # Found the GPT response message - extract EXECUTION_ID
+                                execution_id = response_msg.get('EXECUTION_ID', '')
+                                if execution_id:
+                                    break
+                        except:
+                            continue
                 
                 # Extract Last Customer Message (between "LAST CUSTOMER MESSAGE:" and "Guardrail Output:")
                 customer_msg_match = re.search(
