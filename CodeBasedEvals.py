@@ -6372,6 +6372,24 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'bot_handled_with_bot_response_count': 0,
             'bot_handled_with_bot_response_percentage': 0.0,
             'conversations_with_bot_response_count': 0,
+            # CC_Resolvers — "Chats with 0 Bot Messages" 7-category breakdown
+            'zero_bot_no_maid_linked_count': 0,
+            'zero_bot_no_maid_linked_percentage': 0.0,
+            'zero_bot_silent_transfer_other_dept_count': 0,
+            'zero_bot_silent_transfer_other_dept_percentage': 0.0,
+            'zero_bot_silent_transfer_cc_resolvers_agents_count': 0,
+            'zero_bot_silent_transfer_cc_resolvers_agents_percentage': 0.0,
+            'zero_bot_manual_agent_transfer_count': 0,
+            'zero_bot_manual_agent_transfer_percentage': 0.0,
+            'zero_bot_guardrail_autotransfer_count': 0,
+            'zero_bot_guardrail_autotransfer_percentage': 0.0,
+            'zero_bot_technical_issue_count': 0,
+            'zero_bot_technical_issue_percentage': 0.0,
+            'zero_bot_bot_delay_autotransfer_count': 0,
+            'zero_bot_bot_delay_autotransfer_percentage': 0.0,
+            'zero_bot_uncategorized_count': 0,
+            # Per-chat detail rows for ZERO_BOT_DETAILS_TABLE (CC_Resolvers only)
+            'zero_bot_category_rows': [],
             'proactive_agent_messages_count': proactive_agent_messages_count,
             'proactive_agent_messages_percentage': 0.0,
             'directly_handled_by_seniors_count': directly_handled_by_seniors_count,
@@ -6493,6 +6511,23 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     
     # Initialize CC_Resolvers specific: Track conversations with no bot messages from GPT_CC_RESOLVERS
     chats_with_no_bot_messages_count = 0
+
+    # CC_Resolvers specific: 7-category breakdown for "Chats with 0 Bot Messages"
+    # (See classify_cc_resolvers_zero_bot_msg_chat for detection rules.)
+    zero_bot_category_counts = {
+        'no_maid_linked': 0,
+        'silent_transfer_other_dept': 0,
+        'silent_transfer_cc_resolvers_agents': 0,
+        'manual_agent_transfer': 0,
+        'guardrail_autotransfer': 0,
+        'technical_issue': 0,
+        'bot_delay_autotransfer': 0,
+        'uncategorized': 0,
+    }
+    # CC_Resolvers specific: per-chat detail rows for the 0-bot-msg category
+    # table (one tuple per 0-bot-msg chat: conversation_id, target_date,
+    # department, category). Persisted to ZERO_BOT_DETAILS_TABLE downstream.
+    zero_bot_category_rows = []
     
     # Initialize CC_Resolvers specific: Track handle ratio when bot responds
     # (Exclude conversations with 0 bot messages from both numerator and denominator)
@@ -6516,6 +6551,18 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             
             if len(bot_cc_resolvers_messages) == 0:
                 chats_with_no_bot_messages_count += 1
+                # 7-category classification (single bucket per chat).
+                category = classify_cc_resolvers_zero_bot_msg_chat(conv_df)
+                if category not in zero_bot_category_counts:
+                    category = 'uncategorized'
+                zero_bot_category_counts[category] += 1
+                # Capture per-chat detail row for the ZERO_BOT_DETAILS_TABLE.
+                zero_bot_category_rows.append({
+                    'CONVERSATION_ID': conv_id,
+                    'TARGET_DATE': target_date,
+                    'DEPARTMENT': department_name,
+                    'CATEGORY': category,
+                })
             
             # Track handle ratio when bot responds (bot_message_count > 0)
             # This excludes conversations where bot never sent a normal message
@@ -6667,42 +6714,79 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
                         _classified = True
                         break
     
+    # ── CC_Resolvers Handle Ratio denominator override ────────────────────
+    # For CC_Resolvers, every Handle-Ratio family percentage (Handle Ratio,
+    # its submetrics, and the pie-chart inputs) must EXCLUDE chats with 0 bot
+    # messages from BOTH numerator and denominator. Numerators are already
+    # guarded by `should_count_in_breakdown` / `should_count_exact`, and
+    # bot_handled_count already excludes 0-bot-msg chats by construction
+    # (no normal bot message ⇒ either an agent must speak or a complaint
+    # action is logged, both of which set is_bot_handled=False).
+    handle_ratio_denominator = total_conversations
+    if department_name == 'CC_Resolvers':
+        handle_ratio_denominator = total_conversations - chats_with_no_bot_messages_count
+
     # Calculate percentages
-    bot_handled_percentage = (bot_handled_count / total_conversations * 100) if total_conversations > 0 else 0
-    chats_with_1_plus_percentage = (chats_with_1_plus_agent_messages / total_conversations * 100) if total_conversations > 0 else 0
-    chats_with_2_plus_percentage = (chats_with_2_plus_agent_messages / total_conversations * 100) if total_conversations > 0 else 0
-    chats_with_3_plus_percentage = (chats_with_3_plus_agent_messages / total_conversations * 100) if total_conversations > 0 else 0
-    chats_with_1_plus_excluding_pokes_percentage = (chats_with_1_plus_agent_messages_excluding_pokes / total_conversations * 100) if total_conversations > 0 else 0
-    call_requests_percentage = (call_requests_count / total_conversations * 100) if total_conversations > 0 else 0
+    bot_handled_percentage = (bot_handled_count / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    chats_with_1_plus_percentage = (chats_with_1_plus_agent_messages / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    chats_with_2_plus_percentage = (chats_with_2_plus_agent_messages / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    chats_with_3_plus_percentage = (chats_with_3_plus_agent_messages / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    chats_with_1_plus_excluding_pokes_percentage = (chats_with_1_plus_agent_messages_excluding_pokes / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    call_requests_percentage = (call_requests_count / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
     
     # Calculate agent intervention percentage
     total_messages = total_counted_agent_messages + total_bot_messages
     agent_intervention_percentage = (total_counted_agent_messages / total_messages * 100) if total_messages > 0 else 0
     
     # Calculate bot handled excluding fillers percentage
-    bot_handled_excluding_fillers_percentage = (bot_handled_excluding_fillers_count / total_conversations * 100) if total_conversations > 0 else 0
+    bot_handled_excluding_fillers_percentage = (bot_handled_excluding_fillers_count / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
     
     # Calculate percentages for new metrics
-    chats_with_exactly_1_agent_message_percentage = (chats_with_exactly_1_agent_message / total_conversations * 100) if total_conversations > 0 else 0
-    chats_with_exactly_2_agent_messages_percentage = (chats_with_exactly_2_agent_messages / total_conversations * 100) if total_conversations > 0 else 0
-    chats_with_exactly_3_agent_messages_percentage = (chats_with_exactly_3_agent_messages / total_conversations * 100) if total_conversations > 0 else 0
+    chats_with_exactly_1_agent_message_percentage = (chats_with_exactly_1_agent_message / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    chats_with_exactly_2_agent_messages_percentage = (chats_with_exactly_2_agent_messages / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    chats_with_exactly_3_agent_messages_percentage = (chats_with_exactly_3_agent_messages / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
     
     # Calculate percentage for CC_Resolvers complaint actions
-    complaint_action_percentage = (complaint_action_count / total_conversations * 100) if total_conversations > 0 else 0
-    complaint_action_with_0_agent_messages_percentage = (complaint_action_with_0_agent_messages_count / total_conversations * 100) if total_conversations > 0 else 0
-    complaint_action_with_1_plus_agent_messages_percentage = (complaint_action_with_1_plus_agent_messages_count / total_conversations * 100) if total_conversations > 0 else 0
+    complaint_action_percentage = (complaint_action_count / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    complaint_action_with_0_agent_messages_percentage = (complaint_action_with_0_agent_messages_count / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
+    complaint_action_with_1_plus_agent_messages_percentage = (complaint_action_with_1_plus_agent_messages_count / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
     
     # Calculate percentage for CC_Resolvers chats with no bot messages
+    # (Out of the full population so we can still see how prevalent the
+    # 0-bot-msg cases are relative to all CC_Resolvers chats.)
     chats_with_no_bot_messages_percentage = (chats_with_no_bot_messages_count / total_conversations * 100) if total_conversations > 0 else 0
-    
+
+    # ── CC_Resolvers — "Chats with 0 Bot Messages" 7-category percentages ─
+    # Each percentage is over chats_with_no_bot_messages_count, per spec.
+    def _zero_bot_pct(count):
+        return (count / chats_with_no_bot_messages_count * 100) if chats_with_no_bot_messages_count > 0 else 0.0
+
+    zero_bot_no_maid_linked_count = zero_bot_category_counts['no_maid_linked']
+    zero_bot_silent_transfer_other_dept_count = zero_bot_category_counts['silent_transfer_other_dept']
+    zero_bot_silent_transfer_cc_resolvers_agents_count = zero_bot_category_counts['silent_transfer_cc_resolvers_agents']
+    zero_bot_manual_agent_transfer_count = zero_bot_category_counts['manual_agent_transfer']
+    zero_bot_guardrail_autotransfer_count = zero_bot_category_counts['guardrail_autotransfer']
+    zero_bot_technical_issue_count = zero_bot_category_counts['technical_issue']
+    zero_bot_bot_delay_autotransfer_count = zero_bot_category_counts['bot_delay_autotransfer']
+    zero_bot_uncategorized_count = zero_bot_category_counts['uncategorized']
+
+    zero_bot_no_maid_linked_percentage = _zero_bot_pct(zero_bot_no_maid_linked_count)
+    zero_bot_silent_transfer_other_dept_percentage = _zero_bot_pct(zero_bot_silent_transfer_other_dept_count)
+    zero_bot_silent_transfer_cc_resolvers_agents_percentage = _zero_bot_pct(zero_bot_silent_transfer_cc_resolvers_agents_count)
+    zero_bot_manual_agent_transfer_percentage = _zero_bot_pct(zero_bot_manual_agent_transfer_count)
+    zero_bot_guardrail_autotransfer_percentage = _zero_bot_pct(zero_bot_guardrail_autotransfer_count)
+    zero_bot_technical_issue_percentage = _zero_bot_pct(zero_bot_technical_issue_count)
+    zero_bot_bot_delay_autotransfer_percentage = _zero_bot_pct(zero_bot_bot_delay_autotransfer_count)
+
     # Calculate percentage for CC_Resolvers handle ratio when bot responds
     bot_handled_with_bot_response_percentage = (bot_handled_with_bot_response_count / conversations_with_bot_response_count * 100) if conversations_with_bot_response_count > 0 else 0
     
     # Calculate percentage for poke conversations
-    chats_with_pokes_percentage = (chats_with_pokes / total_conversations * 100) if total_conversations > 0 else 0
+    chats_with_pokes_percentage = (chats_with_pokes / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
     
-    # Calculate percentage for tech error transfers (all departments)
-    tech_error_transfers_percentage = (tech_error_transfers_count / total_conversations * 100) if total_conversations > 0 else 0
+    # Calculate percentage for tech error transfers
+    # CC_Resolvers excludes 0-bot-msg chats; other departments use total.
+    tech_error_transfers_percentage = (tech_error_transfers_count / handle_ratio_denominator * 100) if handle_ratio_denominator > 0 else 0
     
     # Calculate unique union count for MV_Resolvers (supposed ∪ seniors ∪ supervisor-removed-from-base)
     unique_union_count = 0
@@ -6840,6 +6924,24 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'bot_handled_with_bot_response_count': bot_handled_with_bot_response_count,
         'bot_handled_with_bot_response_percentage': bot_handled_with_bot_response_percentage,
         'conversations_with_bot_response_count': conversations_with_bot_response_count,
+        # CC_Resolvers — "Chats with 0 Bot Messages" 7-category breakdown
+        'zero_bot_no_maid_linked_count': zero_bot_no_maid_linked_count,
+        'zero_bot_no_maid_linked_percentage': zero_bot_no_maid_linked_percentage,
+        'zero_bot_silent_transfer_other_dept_count': zero_bot_silent_transfer_other_dept_count,
+        'zero_bot_silent_transfer_other_dept_percentage': zero_bot_silent_transfer_other_dept_percentage,
+        'zero_bot_silent_transfer_cc_resolvers_agents_count': zero_bot_silent_transfer_cc_resolvers_agents_count,
+        'zero_bot_silent_transfer_cc_resolvers_agents_percentage': zero_bot_silent_transfer_cc_resolvers_agents_percentage,
+        'zero_bot_manual_agent_transfer_count': zero_bot_manual_agent_transfer_count,
+        'zero_bot_manual_agent_transfer_percentage': zero_bot_manual_agent_transfer_percentage,
+        'zero_bot_guardrail_autotransfer_count': zero_bot_guardrail_autotransfer_count,
+        'zero_bot_guardrail_autotransfer_percentage': zero_bot_guardrail_autotransfer_percentage,
+        'zero_bot_technical_issue_count': zero_bot_technical_issue_count,
+        'zero_bot_technical_issue_percentage': zero_bot_technical_issue_percentage,
+        'zero_bot_bot_delay_autotransfer_count': zero_bot_bot_delay_autotransfer_count,
+        'zero_bot_bot_delay_autotransfer_percentage': zero_bot_bot_delay_autotransfer_percentage,
+        'zero_bot_uncategorized_count': zero_bot_uncategorized_count,
+        # Per-chat detail rows for ZERO_BOT_DETAILS_TABLE (CC_Resolvers only)
+        'zero_bot_category_rows': zero_bot_category_rows,
         'proactive_agent_messages_count': proactive_agent_messages_count,
         'proactive_agent_messages_percentage': proactive_agent_messages_percentage,
         'directly_handled_by_seniors_count': directly_handled_by_seniors_count,
@@ -6903,7 +7005,10 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'wrong_number_clients_count': wrong_number_clients_count
     }
     
-    print(f"    ✅ {bot_handled_count}/{total_conversations} ({bot_handled_percentage:.1f}%) bot-handled")
+    print(f"    ✅ {bot_handled_count}/{handle_ratio_denominator} ({bot_handled_percentage:.1f}%) bot-handled" + (
+        " [CC_Resolvers Handle Ratio: excludes 0-bot-msg chats]"
+        if department_name == 'CC_Resolvers' else ""
+    ))
     print(f"    📊 Agent message breakdown:")
     print(f"       - 1+ agent messages: {chats_with_1_plus_agent_messages} ({chats_with_1_plus_percentage:.1f}%)")
     print(f"       - 2+ agent messages: {chats_with_2_plus_agent_messages} ({chats_with_2_plus_percentage:.1f}%)")
@@ -6925,6 +7030,58 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         print(f"       └─ With 1+ agent messages: {complaint_action_with_1_plus_agent_messages_count} ({complaint_action_with_1_plus_agent_messages_percentage:.1f}%)")
         print(f"    ⚠️  Chats with no bot messages from GPT_CC_RESOLVERS: {chats_with_no_bot_messages_count} ({chats_with_no_bot_messages_percentage:.1f}%)")
         print(f"    🎯 Handle ratio when bot responds (excluding 0 bot message chats): {bot_handled_with_bot_response_count}/{conversations_with_bot_response_count} ({bot_handled_with_bot_response_percentage:.1f}%)")
+        # 7-category breakdown for "Chats with 0 Bot Messages"
+        print(f"    📂 Chats with 0 Bot Messages breakdown (out of {chats_with_no_bot_messages_count}):")
+        print(f"       1. No Maid Linked to Contract: {zero_bot_no_maid_linked_count} ({zero_bot_no_maid_linked_percentage:.1f}%)")
+        print(f"       2. Bot Silent Transfers to Other Departments: {zero_bot_silent_transfer_other_dept_count} ({zero_bot_silent_transfer_other_dept_percentage:.1f}%)")
+        print(f"       3. Bot Silent Transfers to CC Resolvers Agents: {zero_bot_silent_transfer_cc_resolvers_agents_count} ({zero_bot_silent_transfer_cc_resolvers_agents_percentage:.1f}%)")
+        print(f"       4. Manual Agent Transfer: {zero_bot_manual_agent_transfer_count} ({zero_bot_manual_agent_transfer_percentage:.1f}%)")
+        print(f"       5. Guardrail Issue – System AutoTransfer: {zero_bot_guardrail_autotransfer_count} ({zero_bot_guardrail_autotransfer_percentage:.1f}%)")
+        print(f"       6. Technical Issue: {zero_bot_technical_issue_count} ({zero_bot_technical_issue_percentage:.1f}%)")
+        print(f"       7. Bot Delay – System AutoTransfer: {zero_bot_bot_delay_autotransfer_count} ({zero_bot_bot_delay_autotransfer_percentage:.1f}%)")
+        if zero_bot_uncategorized_count > 0:
+            print(f"       (uncategorized: {zero_bot_uncategorized_count})")
+
+        # ── Verification (TEST-gated) ──────────────────────────────────────
+        # Reconcile the 7 + uncategorized buckets with the total 0-bot-msg
+        # count, and surface the classifier's verdict for the eight example
+        # chat IDs from the spec (when present in the dataset).
+        _zero_bot_sum = (
+            zero_bot_no_maid_linked_count
+            + zero_bot_silent_transfer_other_dept_count
+            + zero_bot_silent_transfer_cc_resolvers_agents_count
+            + zero_bot_manual_agent_transfer_count
+            + zero_bot_guardrail_autotransfer_count
+            + zero_bot_technical_issue_count
+            + zero_bot_bot_delay_autotransfer_count
+            + zero_bot_uncategorized_count
+        )
+        if _zero_bot_sum != chats_with_no_bot_messages_count:
+            print(
+                f"    ❌ ZERO_BOT_BREAKDOWN MISMATCH: categories sum to "
+                f"{_zero_bot_sum} but chats_with_no_bot_messages_count = "
+                f"{chats_with_no_bot_messages_count}"
+            )
+        if globals().get('TEST', False):
+            _spec_cases = [
+                ('CH26d81bf6ac494763b953ad297f194d32', 'no_maid_linked'),
+                ('CH84a5ca73f57944939425cf8bd29612a3', 'silent_transfer_other_dept'),
+                ('CHe0fa0f3343864f21a8d0556eba7b9237', 'manual_agent_transfer'),
+                ('CHf9320f7f9ccd47818d781b9c52bb200d', 'guardrail_autotransfer'),
+                ('CHfda01146608b413a80f175f886217e3e', 'guardrail_autotransfer'),
+                ('CH9f6a1048e2a84cb399c8dee6d941c33e', 'technical_issue'),
+                ('CH6430643ecd274d96bcfbfe0512b564c0', 'technical_issue'),
+                ('CHfc2381b3e7f647188f26162bf46c0063', 'bot_delay_autotransfer'),
+            ]
+            print("    🧪 ZERO_BOT classifier spec checks:")
+            for _cid, _expected in _spec_cases:
+                _conv_df = df[df['CONVERSATION_ID'] == _cid]
+                if _conv_df.empty:
+                    print(f"       - {_cid}: not in dataset (skipped)")
+                    continue
+                _actual = classify_cc_resolvers_zero_bot_msg_chat(_conv_df)
+                _ok = "✅" if _actual == _expected else "❌"
+                print(f"       {_ok} {_cid}: expected={_expected}, actual={_actual}")
     
     # MV_RESOLVERS PROACTIVE AGENT METRICS PRINT DISABLED
     # # MV_Resolvers specific: Print proactive agent metrics
@@ -8368,6 +8525,21 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'BOT_HANDLED_WITH_BOT_RESPONSE_COUNT': bot_data.get('bot_handled_with_bot_response_count', 0),
             'BOT_HANDLED_WITH_BOT_RESPONSE_PERCENTAGE': round(bot_data.get('bot_handled_with_bot_response_percentage', 0), 2),
             'CONVERSATIONS_WITH_BOT_RESPONSE_COUNT': bot_data.get('conversations_with_bot_response_count', 0),
+            # CC_Resolvers — "Chats with 0 Bot Messages" 7-category breakdown
+            'ZERO_BOT_NO_MAID_LINKED_COUNT': bot_data.get('zero_bot_no_maid_linked_count', 0),
+            'ZERO_BOT_NO_MAID_LINKED_PERCENTAGE': round(bot_data.get('zero_bot_no_maid_linked_percentage', 0), 2),
+            'ZERO_BOT_SILENT_TRANSFER_OTHER_DEPT_COUNT': bot_data.get('zero_bot_silent_transfer_other_dept_count', 0),
+            'ZERO_BOT_SILENT_TRANSFER_OTHER_DEPT_PERCENTAGE': round(bot_data.get('zero_bot_silent_transfer_other_dept_percentage', 0), 2),
+            'ZERO_BOT_SILENT_TRANSFER_CC_RESOLVERS_AGENTS_COUNT': bot_data.get('zero_bot_silent_transfer_cc_resolvers_agents_count', 0),
+            'ZERO_BOT_SILENT_TRANSFER_CC_RESOLVERS_AGENTS_PERCENTAGE': round(bot_data.get('zero_bot_silent_transfer_cc_resolvers_agents_percentage', 0), 2),
+            'ZERO_BOT_MANUAL_AGENT_TRANSFER_COUNT': bot_data.get('zero_bot_manual_agent_transfer_count', 0),
+            'ZERO_BOT_MANUAL_AGENT_TRANSFER_PERCENTAGE': round(bot_data.get('zero_bot_manual_agent_transfer_percentage', 0), 2),
+            'ZERO_BOT_GUARDRAIL_AUTOTRANSFER_COUNT': bot_data.get('zero_bot_guardrail_autotransfer_count', 0),
+            'ZERO_BOT_GUARDRAIL_AUTOTRANSFER_PERCENTAGE': round(bot_data.get('zero_bot_guardrail_autotransfer_percentage', 0), 2),
+            'ZERO_BOT_TECHNICAL_ISSUE_COUNT': bot_data.get('zero_bot_technical_issue_count', 0),
+            'ZERO_BOT_TECHNICAL_ISSUE_PERCENTAGE': round(bot_data.get('zero_bot_technical_issue_percentage', 0), 2),
+            'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_COUNT': bot_data.get('zero_bot_bot_delay_autotransfer_count', 0),
+            'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_PERCENTAGE': round(bot_data.get('zero_bot_bot_delay_autotransfer_percentage', 0), 2),
             
             # Call Requests Metrics
             'Call_Requests_Count': bot_data.get('call_requests_count', 0),
@@ -8637,6 +8809,20 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'BOT_HANDLED_WITH_BOT_RESPONSE_COUNT': 'NUMBER',
                 'BOT_HANDLED_WITH_BOT_RESPONSE_PERCENTAGE': 'FLOAT',
                 'CONVERSATIONS_WITH_BOT_RESPONSE_COUNT': 'NUMBER',
+                'ZERO_BOT_NO_MAID_LINKED_COUNT': 'NUMBER',
+                'ZERO_BOT_NO_MAID_LINKED_PERCENTAGE': 'FLOAT',
+                'ZERO_BOT_SILENT_TRANSFER_OTHER_DEPT_COUNT': 'NUMBER',
+                'ZERO_BOT_SILENT_TRANSFER_OTHER_DEPT_PERCENTAGE': 'FLOAT',
+                'ZERO_BOT_SILENT_TRANSFER_CC_RESOLVERS_AGENTS_COUNT': 'NUMBER',
+                'ZERO_BOT_SILENT_TRANSFER_CC_RESOLVERS_AGENTS_PERCENTAGE': 'FLOAT',
+                'ZERO_BOT_MANUAL_AGENT_TRANSFER_COUNT': 'NUMBER',
+                'ZERO_BOT_MANUAL_AGENT_TRANSFER_PERCENTAGE': 'FLOAT',
+                'ZERO_BOT_GUARDRAIL_AUTOTRANSFER_COUNT': 'NUMBER',
+                'ZERO_BOT_GUARDRAIL_AUTOTRANSFER_PERCENTAGE': 'FLOAT',
+                'ZERO_BOT_TECHNICAL_ISSUE_COUNT': 'NUMBER',
+                'ZERO_BOT_TECHNICAL_ISSUE_PERCENTAGE': 'FLOAT',
+                'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_COUNT': 'NUMBER',
+                'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_PERCENTAGE': 'FLOAT',
                 'PROACTIVE_AGENT_MESSAGES_COUNT': 'NUMBER',
                 'PROACTIVE_AGENT_MESSAGES_PERCENTAGE': 'FLOAT',
                 'DIRECTLY_HANDLED_BY_SENIORS_COUNT': 'NUMBER',
@@ -8812,6 +8998,24 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'UNIQUE_CLIENTS_INITIATED_BY_US': 'NUMBER',
                 'UNIQUE_CLIENTS_INITIATED_BY_CLIENT': 'NUMBER',
                 'WRONG_NUMBER_CLIENTS_COUNT':    'NUMBER',
+                # CC_Resolvers — "Chats with 0 Bot Messages" 7-category breakdown.
+                # Listed here so the writer auto-ALTERs any pre-existing
+                # master-metrics table to add the new columns instead of
+                # erroring on insert.
+                'ZERO_BOT_NO_MAID_LINKED_COUNT':                          'NUMBER',
+                'ZERO_BOT_NO_MAID_LINKED_PERCENTAGE':                     'FLOAT',
+                'ZERO_BOT_SILENT_TRANSFER_OTHER_DEPT_COUNT':              'NUMBER',
+                'ZERO_BOT_SILENT_TRANSFER_OTHER_DEPT_PERCENTAGE':         'FLOAT',
+                'ZERO_BOT_SILENT_TRANSFER_CC_RESOLVERS_AGENTS_COUNT':     'NUMBER',
+                'ZERO_BOT_SILENT_TRANSFER_CC_RESOLVERS_AGENTS_PERCENTAGE':'FLOAT',
+                'ZERO_BOT_MANUAL_AGENT_TRANSFER_COUNT':                   'NUMBER',
+                'ZERO_BOT_MANUAL_AGENT_TRANSFER_PERCENTAGE':              'FLOAT',
+                'ZERO_BOT_GUARDRAIL_AUTOTRANSFER_COUNT':                  'NUMBER',
+                'ZERO_BOT_GUARDRAIL_AUTOTRANSFER_PERCENTAGE':             'FLOAT',
+                'ZERO_BOT_TECHNICAL_ISSUE_COUNT':                         'NUMBER',
+                'ZERO_BOT_TECHNICAL_ISSUE_PERCENTAGE':                    'FLOAT',
+                'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_COUNT':                  'NUMBER',
+                'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_PERCENTAGE':             'FLOAT',
             }
             for df_col, col_type in new_col_type_map.items():
                 if df_col.upper() not in table_columns_upper and df_col in new_metrics_df.columns:
@@ -8855,6 +9059,131 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
     except Exception as e:
         error_report = format_error_details(e, "UPDATING MASTER METRICS")
         print(f"❌ Failed to update master metrics: {str(e)}")
+        print(error_report)
+        return False
+
+
+def update_zero_bot_msg_details_table_snowflake(session: snowpark.Session, bot_results, target_date):
+    """Persist per-chat detail rows for the CC_Resolvers '0 bot messages'
+    7-category breakdown to a Snowflake table.
+
+    Each row written represents one CC_Resolvers conversation that had
+    zero bot normal messages from `GPT_CC_RESOLVERS`, along with the
+    single category it was classified into by
+    `classify_cc_resolvers_zero_bot_msg_chat`.
+
+    Table schema (created on first run):
+
+        CONVERSATION_ID  VARCHAR
+        TARGET_DATE      VARCHAR(50)
+        DEPARTMENT       VARCHAR(100)
+        CATEGORY         VARCHAR(100)
+        INSERTED_AT      TIMESTAMP_NTZ
+
+    The destination table name is taken from the `ZERO_BOT_DETAILS_TABLE`
+    global if defined (e.g. set in the notebook), otherwise defaults to
+    `EVALS_ZERO_BOT_MSG_DETAILS_test_only` to mirror the master metrics
+    table naming.
+
+    Existing rows for the same (TARGET_DATE, DEPARTMENT) are deleted before
+    insert so re-running the pipeline for the same date is idempotent.
+
+    Args:
+        session: Snowflake session.
+        bot_results: dict keyed by department name -> per-department
+            results dict produced by
+            `analyze_bot_handled_conversations_single_department`.
+            Only entries that include `zero_bot_category_rows` (i.e.
+            CC_Resolvers) contribute rows.
+        target_date: Run date string (YYYY-MM-DD).
+
+    Returns:
+        bool: True on success (including the no-rows case), False on error.
+    """
+    table_name = globals().get('ZERO_BOT_DETAILS_TABLE', 'EVALS_ZERO_BOT_MSG_DETAILS_test_only')
+    print(f"\n📂 UPDATING 0-BOT-MSG DETAILS TABLE ({table_name})...")
+
+    try:
+        # Step 1: Collect all detail rows from every department's results.
+        all_rows = []
+        for dept_name, dept_results in (bot_results or {}).items():
+            if not isinstance(dept_results, dict):
+                continue
+            rows = dept_results.get('zero_bot_category_rows', []) or []
+            for r in rows:
+                all_rows.append({
+                    'CONVERSATION_ID': r.get('CONVERSATION_ID'),
+                    'TARGET_DATE': r.get('TARGET_DATE', target_date),
+                    'DEPARTMENT': r.get('DEPARTMENT', dept_name),
+                    'CATEGORY': r.get('CATEGORY'),
+                })
+
+        if not all_rows:
+            print(f"  ℹ️  No 0-bot-msg detail rows to write for {target_date}. Skipping.")
+            return True
+
+        details_df = pd.DataFrame(all_rows)
+        details_df['INSERTED_AT'] = datetime.now()
+
+        departments_to_update = details_df['DEPARTMENT'].unique().tolist()
+        print(f"  Rows to write: {len(details_df)}")
+        print(f"  Departments: {departments_to_update}")
+
+        # Step 2: Check if table exists.
+        try:
+            check_query = f"""
+            SELECT COUNT(*) AS count
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = UPPER('{table_name}')
+            AND TABLE_SCHEMA = CURRENT_SCHEMA()
+            """
+            exists = session.sql(check_query).collect()[0]['COUNT'] > 0
+        except Exception:
+            exists = False
+
+        # Step 3: Create the table if it doesn't exist.
+        if not exists:
+            print(f"  Table {table_name} does not exist. Creating it...")
+            create_query = f"""
+            CREATE TABLE {table_name} (
+                CONVERSATION_ID VARCHAR,
+                TARGET_DATE VARCHAR(50),
+                DEPARTMENT VARCHAR(100),
+                CATEGORY VARCHAR(100),
+                INSERTED_AT TIMESTAMP_NTZ
+            )
+            """
+            session.sql(create_query).collect()
+            print(f"  ✅ Created {table_name}")
+
+        # Step 4: Idempotency — delete any rows we are about to overwrite for
+        # this (TARGET_DATE, DEPARTMENT) combination.
+        departments_str = "', '".join(departments_to_update)
+        delete_query = f"""
+        DELETE FROM {table_name}
+        WHERE TARGET_DATE = '{target_date}'
+        AND DEPARTMENT IN ('{departments_str}')
+        """
+        session.sql(delete_query).collect()
+        print(f"  Cleaned existing rows for {target_date} and {departments_to_update}")
+
+        # Step 5: Append the new rows.
+        snowpark_df = session.create_dataframe(details_df)
+        snowpark_df.write.mode("append").save_as_table(table_name)
+
+        # Step 6: Verify final count for this run.
+        count_query = f"""
+        SELECT COUNT(*) AS row_count
+        FROM {table_name}
+        WHERE TARGET_DATE = '{target_date}'
+        """
+        final_count = session.sql(count_query).collect()[0]['ROW_COUNT']
+        print(f"  ✅ Wrote {len(details_df)} rows to {table_name}. Total rows for {target_date}: {final_count}")
+        return True
+
+    except Exception as e:
+        error_report = format_error_details(e, "UPDATING 0-BOT-MSG DETAILS")
+        print(f"❌ Failed to update 0-bot-msg details table: {str(e)}")
         print(error_report)
         return False
 
@@ -8912,7 +9241,12 @@ def phase2_core_analytics_processor(session: snowpark.Session, target_date=None)
         
         # Step 6: Update Master Metrics Table
         master_success = update_master_metrics_table_snowflake(session, combined_metrics)
-        
+
+        # Step 6b: Update 0-bot-msg per-chat details table (CC_Resolvers only).
+        zero_bot_details_success = update_zero_bot_msg_details_table_snowflake(
+            session, bot_results, target_date_str
+        )
+
         # Generate final summary
         total_conversations = sum(r.get('total_conversations', 0) for r in bot_results.values())
         total_bot_handled = sum(r.get('bot_handled_count', 0) for r in bot_results.values())
@@ -11866,6 +12200,21 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'BOT_HANDLED_WITH_BOT_RESPONSE_COUNT': bot_data.get('bot_handled_with_bot_response_count', 0),
             'BOT_HANDLED_WITH_BOT_RESPONSE_PERCENTAGE': round(bot_data.get('bot_handled_with_bot_response_percentage', 0), 2),
             'CONVERSATIONS_WITH_BOT_RESPONSE_COUNT': bot_data.get('conversations_with_bot_response_count', 0),
+            # CC_Resolvers — "Chats with 0 Bot Messages" 7-category breakdown
+            'ZERO_BOT_NO_MAID_LINKED_COUNT': bot_data.get('zero_bot_no_maid_linked_count', 0),
+            'ZERO_BOT_NO_MAID_LINKED_PERCENTAGE': round(bot_data.get('zero_bot_no_maid_linked_percentage', 0), 2),
+            'ZERO_BOT_SILENT_TRANSFER_OTHER_DEPT_COUNT': bot_data.get('zero_bot_silent_transfer_other_dept_count', 0),
+            'ZERO_BOT_SILENT_TRANSFER_OTHER_DEPT_PERCENTAGE': round(bot_data.get('zero_bot_silent_transfer_other_dept_percentage', 0), 2),
+            'ZERO_BOT_SILENT_TRANSFER_CC_RESOLVERS_AGENTS_COUNT': bot_data.get('zero_bot_silent_transfer_cc_resolvers_agents_count', 0),
+            'ZERO_BOT_SILENT_TRANSFER_CC_RESOLVERS_AGENTS_PERCENTAGE': round(bot_data.get('zero_bot_silent_transfer_cc_resolvers_agents_percentage', 0), 2),
+            'ZERO_BOT_MANUAL_AGENT_TRANSFER_COUNT': bot_data.get('zero_bot_manual_agent_transfer_count', 0),
+            'ZERO_BOT_MANUAL_AGENT_TRANSFER_PERCENTAGE': round(bot_data.get('zero_bot_manual_agent_transfer_percentage', 0), 2),
+            'ZERO_BOT_GUARDRAIL_AUTOTRANSFER_COUNT': bot_data.get('zero_bot_guardrail_autotransfer_count', 0),
+            'ZERO_BOT_GUARDRAIL_AUTOTRANSFER_PERCENTAGE': round(bot_data.get('zero_bot_guardrail_autotransfer_percentage', 0), 2),
+            'ZERO_BOT_TECHNICAL_ISSUE_COUNT': bot_data.get('zero_bot_technical_issue_count', 0),
+            'ZERO_BOT_TECHNICAL_ISSUE_PERCENTAGE': round(bot_data.get('zero_bot_technical_issue_percentage', 0), 2),
+            'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_COUNT': bot_data.get('zero_bot_bot_delay_autotransfer_count', 0),
+            'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_PERCENTAGE': round(bot_data.get('zero_bot_bot_delay_autotransfer_percentage', 0), 2),
             
             # MV_Resolvers Proactive Agent Messages Metrics (Phase 2)
             'PROACTIVE_AGENT_MESSAGES_COUNT': bot_data.get('proactive_agent_messages_count', 0),
@@ -12322,7 +12671,12 @@ def phase3_advanced_analytics_processor(session: snowpark.Session, target_date=N
         # Update Master Metrics Table with Enhanced Data
         print(f"\n📊 UPDATING MASTER METRICS TABLE...")
         master_success = update_master_metrics_table_snowflake(session, combined_metrics)
-        
+
+        # Update 0-bot-msg per-chat details table (CC_Resolvers only).
+        zero_bot_details_success = update_zero_bot_msg_details_table_snowflake(
+            session, bot_results, target_date_str
+        )
+
         # Generate comprehensive summary
         total_conversations = sum(r.get('total_conversations', 0) for r in bot_results.values())
         total_bot_handled = sum(r.get('bot_handled_count', 0) for r in bot_results.values())
@@ -13655,6 +14009,339 @@ def test_issues_single_department(session: snowpark.Session, department_name, ta
         error_report = format_error_details(e, f"ISSUES TEST - {department_name}")
         print(error_report)
 
+
+
+ZERO_BOT_MSG_CATEGORIES = (
+    'no_maid_linked',
+    'silent_transfer_other_dept',
+    'silent_transfer_cc_resolvers_agents',
+    'manual_agent_transfer',
+    'guardrail_autotransfer',
+    'technical_issue',
+    'bot_delay_autotransfer',
+    'uncategorized',
+)
+
+
+def _zero_bot_has_no_maid_linked(conv_df):
+    """Rule 1: any private system message contains the No-Maid signature."""
+    needle = 'no tagged or untagged maid found on contract'
+    msgs = conv_df[
+        (conv_df['SENT_BY'].astype(str).str.upper() == 'SYSTEM') &
+        (conv_df['MESSAGE_TYPE'].astype(str).str.upper() == 'PRIVATE MESSAGE')
+    ]
+    for _, m in msgs.iterrows():
+        text = str(m.get('TEXT', '')).lower()
+        if needle in text:
+            return True
+    return False
+
+
+def _zero_bot_has_transfer_chat_tool_call(conv_df):
+    """True if any message in the conversation invokes the Transfer_Chat
+    tool (in plain text, in a `tool_calls` payload, or in a guardrail
+    log that quotes the tool name)."""
+    if conv_df is None or len(conv_df) == 0:
+        return False
+    pat = re.compile(r'transfer_chat', re.IGNORECASE)
+    for _, m in conv_df.iterrows():
+        text = str(m.get('TEXT', ''))
+        if not text:
+            continue
+        if pat.search(text):
+            return True
+    return False
+
+
+def _zero_bot_transfer_chat_destination(conv_df):
+    """Look at every Transfer_Chat tool call in the conversation and return
+    the LAST extracted destination string (lowercased), or '' if none.
+
+    Detection: TEXT either mentions the tool name `Transfer_Chat` or contains
+    a tool_calls payload whose name is Transfer_Chat. Destination is parsed
+    from any of the common arg keys used in production:
+
+        Department_name / department / target_department / target_department_name
+        dept / dept_name / to_department / dest_department
+        skill / target_skill / destination / queue / target_queue
+
+    The match is case-insensitive (so production `Department_name` is
+    picked up by the lowercase key `department_name`). The LAST occurrence
+    in the conversation wins (in case the bot tried multiple transfers).
+    """
+    dest_keys = (
+        'department', 'department_name',
+        'target_department', 'target_department_name',
+        'dept', 'dept_name', 'to_department', 'dest_department',
+        'skill', 'target_skill',
+        'destination', 'queue', 'target_queue',
+    )
+    last_dest = ''
+    for _, m in conv_df.iterrows():
+        text = str(m.get('TEXT', ''))
+        if not text:
+            continue
+        if 'transfer_chat' not in text.lower():
+            continue
+        # Pull JSON-style argument values for any of the destination keys.
+        # Also tolerate backslash-escaped quotes, which appear when the JSON
+        # is itself stored inside another string field.
+        for key in dest_keys:
+            for match in re.finditer(
+                rf'\\?"{key}\\?"\s*:\s*\\?"([^"\\]+)\\?"',
+                text,
+                re.IGNORECASE,
+            ):
+                last_dest = match.group(1).strip().lower()
+    return last_dest
+
+
+def _zero_bot_has_switch_maid_context_skill_change(conv_df):
+    """Rule 2 sub-condition: a Switch_Maid_Context tool call coincided with
+    a change of TARGET_SKILL_PER_MESSAGE during the conversation."""
+    has_switch_maid = conv_df['TEXT'].astype(str).str.contains(
+        'switch_maid_context', case=False, na=False
+    ).any()
+    if not has_switch_maid:
+        return False
+    skills = (
+        conv_df['TARGET_SKILL_PER_MESSAGE']
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    skills = skills[skills != '']
+    return skills.nunique() > 1
+
+
+def _is_system_transferor(name):
+    """Return True if the 'By <name>' value is an automation/system user
+    rather than a human agent. Only human agents qualify for Rule 4
+    (Manual Agent Transfer); admin is handled separately for Rule 7.
+
+    Examples seen in production:
+        api.n8n.temp / api.n8n / api / TWILIO_FLOW / system / temp / bot
+    Note: parse_transfer extracts only \\w+ after 'By ', so
+    'api.n8n.temp' becomes 'api' here — startswith('api') still catches
+    that family.
+    """
+    if not name:
+        return True
+    n = name.strip().lower()
+    if n in ('admin', 'bot', 'system', 'temp'):
+        return True
+    if n.startswith('api') or 'n8n' in n or 'twilio' in n:
+        return True
+    return False
+
+
+def _zero_bot_named_agent_transfer(conv_df):
+    """Detect a Manual Agent Transfer system log (Rule 4) vs a Bot Delay
+    AutoTransfer (Rule 7). Returns one of:
+        'manual_agent' - transferred By a human agent
+        'admin'        - transferred By admin
+        ''             - no matching transfer log found
+    Both rules require the path GPT_CC_RESOLVERS -> CC_RESOLVERS_AGENTS.
+    """
+    sys_transfers = conv_df[
+        (conv_df['SENT_BY'].astype(str).str.upper() == 'SYSTEM') &
+        (conv_df['MESSAGE_TYPE'].astype(str).str.upper() == 'TRANSFER')
+    ]
+    found_named = False
+    found_admin = False
+    for _, m in sys_transfers.iterrows():
+        text = str(m.get('TEXT', ''))
+        if not text:
+            continue
+        parsed = parse_transfer(text)
+        from_skill = parsed.get('from_skill', '').upper()
+        to_skill = parsed.get('to_skill', '').upper()
+        by_who = parsed.get('by', '').strip()
+        if from_skill != 'GPT_CC_RESOLVERS':
+            continue
+        if 'CC_RESOLVERS_AGENTS' not in to_skill:
+            continue
+        if not by_who:
+            continue
+        by_lower = by_who.lower()
+        if by_lower == 'admin':
+            found_admin = True
+            continue
+        if _is_system_transferor(by_who):
+            # api.n8n.temp / TWILIO_FLOW / etc. — automation, not a human
+            # agent. These transfers should NOT be classified as Rule 4.
+            continue
+        found_named = True
+    if found_named:
+        return 'manual_agent'
+    if found_admin:
+        return 'admin'
+    return ''
+
+
+def _zero_bot_has_guardrail_autotransfer(conv_df):
+    """Rule 5: a Guardrail-driven autotransfer. The spec advertises a
+    'TRANSFER OCCURED' header, but in production the marker is just a
+    plain SYSTEM private message whose body contains one of the
+    guardrail Reason phrases (same shape as the Tech Issue marker).
+    So we match the phrase directly in any SYSTEM message:
+        * 'Guardrail Wrong Tool' / 'wrong tool ... twice'
+        * 'false promises to the client'
+        * 'missing tool'
+    """
+    pattern_wrong_tool = re.compile(
+        r'guardrail\s+wrong\s+tool', re.IGNORECASE
+    )
+    pattern_false_promise = re.compile(
+        r'false\s+promises?\s+to\s+the\s+client', re.IGNORECASE
+    )
+    pattern_missing_tool = re.compile(
+        r'missing\s+tool', re.IGNORECASE
+    )
+    sys_msgs = conv_df[
+        conv_df['SENT_BY'].astype(str).str.upper() == 'SYSTEM'
+    ]
+    for _, m in sys_msgs.iterrows():
+        text = str(m.get('TEXT', ''))
+        if not text:
+            continue
+        if (pattern_wrong_tool.search(text)
+                or pattern_false_promise.search(text)
+                or pattern_missing_tool.search(text)):
+            return True
+    return False
+
+
+def _zero_bot_has_technical_issue(conv_df):
+    """Rule 6: API failure transfer OR a tool call result=failure with
+    apiCategory=Tool. Tolerates the multiple production log shapes:
+        * Plain text private message:
+            'Reason: Tool API Failure
+             API: /chatcc/...'
+        * 'Error Task:' wrapper with the same fields inside.
+        * JSON-as-string with backslash-escaped quotes:
+            '...\\"result\\": \\"failure\\" ... \\"apiCategory\\": \\"Tool\\"...'
+    """
+    sys_msgs = conv_df[
+        conv_df['SENT_BY'].astype(str).str.upper() == 'SYSTEM'
+    ]
+
+    # (a) Reason: Tool API Failure with an API: line (no "TRANSFER OCCURED"
+    # prefix is required — the real CC_Resolvers marker is the bare
+    # private-message body or the agent-side 'Error Task:' wrapper).
+    reason_re = re.compile(
+        r'reason\s*:\s*tool\s+api\s+failure', re.IGNORECASE
+    )
+    api_line_re = re.compile(r'\bAPI\s*:', re.IGNORECASE)
+    for _, m in sys_msgs.iterrows():
+        text = str(m.get('TEXT', ''))
+        if not text:
+            continue
+        if reason_re.search(text) and api_line_re.search(text):
+            return True
+
+    # (b) Tool failure JSON with result=failure AND apiCategory=Tool. The
+    # JSON arrives as an escaped-quote string in the TEXT column, so the
+    # regex tolerates an optional backslash before each double-quote.
+    failure_re = re.compile(
+        r'\\?"result\\?"\s*:\s*\\?"failure\\?"', re.IGNORECASE
+    )
+    tool_cat_re = re.compile(
+        r'\\?"apicategory\\?"\s*:\s*\\?"tool\\?"', re.IGNORECASE
+    )
+    for _, m in sys_msgs.iterrows():
+        text = str(m.get('TEXT', ''))
+        if not text:
+            continue
+        if failure_re.search(text) and tool_cat_re.search(text):
+            return True
+
+    return False
+
+
+def classify_cc_resolvers_zero_bot_msg_chat(conv_df):
+    """Classify a CC_Resolvers conversation that has 0 normal bot messages
+    into exactly ONE of the seven categories from the spec. Falls back to
+    'uncategorized' if no rule matches.
+
+    Priority model (per user clarification):
+
+      * Rule 1 (No Maid Linked) is THE priority — it always wins when its
+        marker is present.
+      * Rules 2-7 are notionally equal-priority because in production a
+        chat is expected to carry only one of those signals. Where two
+        signals legitimately co-occur (e.g. a Tool API Failure auto-
+        transfer also issues a Transfer_Chat tool call), the more
+        SPECIFIC marker (Tech Issue / Guardrail) is checked before the
+        more GENERIC one (Transfer_Chat) so the chat is bucketed by its
+        ROOT CAUSE rather than by the transfer mechanism it happened
+        to use.
+
+    Effective evaluation order:
+
+      1. no_maid_linked                       (Rule 1)
+      2. guardrail_autotransfer               (Rule 5 — specific reason)
+      3. technical_issue                      (Rule 6 — specific reason)
+      4. silent_transfer_other_dept           (Rule 2 — Transfer_Chat)
+      5. silent_transfer_cc_resolvers_agents  (Rule 3 — Transfer_Chat)
+      6. manual_agent_transfer                (Rule 4 — named human agent)
+      7. bot_delay_autotransfer               (Rule 7 — admin/system xfer)
+    """
+    if conv_df is None or len(conv_df) == 0:
+        return 'uncategorized'
+
+    # Rule 1 — No Maid Linked. Top priority per user's explicit instruction.
+    if _zero_bot_has_no_maid_linked(conv_df):
+        return 'no_maid_linked'
+
+    # Rule 5 — Guardrail Autotransfer (specific reason marker; checked
+    # before the generic Transfer_Chat detector because the system uses
+    # Transfer_Chat as the *mechanism* for guardrail auto-transfers).
+    if _zero_bot_has_guardrail_autotransfer(conv_df):
+        return 'guardrail_autotransfer'
+
+    # Rule 6 — Technical Issue (specific reason marker; same rationale as
+    # Rule 5 above — Tool API Failure auto-transfers also fire a
+    # Transfer_Chat tool call, so we must classify by reason first).
+    if _zero_bot_has_technical_issue(conv_df):
+        return 'technical_issue'
+
+    # Rule 2/3 — Transfer_Chat tool (generic transfer mechanism). Per user
+    # clarification, ANY Transfer_Chat call to a destination that is not
+    # CC_RESOLVERS_AGENTS goes to Rule 2; only an explicit transfer to
+    # CC_RESOLVERS_AGENTS (without a Switch_Maid_Context override) goes
+    # to Rule 3. If the tool call exists but we can't parse a destination
+    # we conservatively bucket it into Rule 2 (it's "anything that isn't
+    # CC_RESOLVERS_AGENTS" by default).
+    has_transfer_chat = _zero_bot_has_transfer_chat_tool_call(conv_df)
+    transfer_dest = _zero_bot_transfer_chat_destination(conv_df) if has_transfer_chat else ''
+    has_switch_maid = _zero_bot_has_switch_maid_context_skill_change(conv_df)
+    if has_transfer_chat:
+        is_to_cc_resolvers_agents = bool(transfer_dest) and (
+            'cc_resolvers_agents' in transfer_dest
+            or 'cc resolvers agents' in transfer_dest
+        )
+        if is_to_cc_resolvers_agents:
+            # Switch_Maid_Context cases belong in Rule 2 per spec example.
+            if has_switch_maid:
+                return 'silent_transfer_other_dept'
+            return 'silent_transfer_cc_resolvers_agents'
+        # Any other destination — including unknown — falls into Rule 2.
+        return 'silent_transfer_other_dept'
+    if has_switch_maid:
+        return 'silent_transfer_other_dept'
+
+    # Rule 4 — Manual agent transfer (named human agent in transfer log,
+    # filtered against automation users via _is_system_transferor).
+    named_kind = _zero_bot_named_agent_transfer(conv_df)
+    if named_kind == 'manual_agent':
+        return 'manual_agent_transfer'
+
+    # Rule 7 — Bot Delay / admin-initiated system transfer.
+    if named_kind == 'admin':
+        return 'bot_delay_autotransfer'
+
+    return 'uncategorized'
 
 
 def parse_transfer(text):
