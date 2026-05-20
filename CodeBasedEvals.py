@@ -580,13 +580,13 @@ def get_snowflake_departments_config():
     Maps department names to their bot_skills, agent_skills, and Snowflake table names.
     """
     return {
-        'CC_Resolvers': {
-            'bot_skills': ['GPT_CC_RESOLVERS'],
-            'agent_skills': ['CC_RESOLVERS_AGENTS', 'GPT CC Shadowers','GPT_CC_RESOLVERS_SHADOWERS'],
-            'table_name': 'SILVER.CHAT_EVALS.CC_CLIENT_CHATS',  # Update with actual table name
-            'skill_filter': 'gpt_cc_resolvers',  # For compatibility with existing logic
-            'bot_filter': 'bot'
-        },
+        # 'CC_Resolvers': {
+        #     'bot_skills': ['GPT_CC_RESOLVERS'],
+        #     'agent_skills': ['CC_RESOLVERS_AGENTS', 'GPT CC Shadowers','GPT_CC_RESOLVERS_SHADOWERS'],
+        #     'table_name': 'SILVER.CHAT_EVALS.CC_CLIENT_CHATS',  # Update with actual table name
+        #     'skill_filter': 'gpt_cc_resolvers',  # For compatibility with existing logic
+        #     'bot_filter': 'bot'
+        # },
         'MV_Resolvers': {
             'bot_skills': ['GPT_MV_RESOLVERS'],
             'agent_skills': ['MV_RESOLVERS_SENIORS', 'MV_CALLERS', 'MV_RESOLVERS_MANAGER', 
@@ -595,20 +595,20 @@ def get_snowflake_departments_config():
             'skill_filter': 'gpt_mv_resolvers',
             'bot_filter': 'bot'
         },
-        'CC_Sales': {
-            'bot_skills': ['GPT_CC_PROSPECT'],
-            'agent_skills': ['GPT CC Shadowers'],
-            'table_name': 'SILVER.CHAT_EVALS.CC_SALES_CHATS',  # Update with actual table name
-            'skill_filter': 'gpt_cc_prospect',
-            'bot_filter': 'bot'
-        },
-        'MV_Sales': {
-            'bot_skills': ['GPT_MV_PROSPECT','GPT_MV_PROSPECT_N8N'],
-            'agent_skills': ['CHATGPT_SALES_SHADOWERS'],
-            'table_name': 'SILVER.CHAT_EVALS.MV_SALES_CHATS',  # Update with actual table name
-            'skill_filter': 'gpt_mv_prospect',
-            'bot_filter': 'bot'
-        },
+        # 'CC_Sales': {
+        #     'bot_skills': ['GPT_CC_PROSPECT'],
+        #     'agent_skills': ['GPT CC Shadowers'],
+        #     'table_name': 'SILVER.CHAT_EVALS.CC_SALES_CHATS',  # Update with actual table name
+        #     'skill_filter': 'gpt_cc_prospect',
+        #     'bot_filter': 'bot'
+        # },
+        # 'MV_Sales': {
+        #     'bot_skills': ['GPT_MV_PROSPECT','GPT_MV_PROSPECT_N8N'],
+        #     'agent_skills': ['CHATGPT_SALES_SHADOWERS'],
+        #     'table_name': 'SILVER.CHAT_EVALS.MV_SALES_CHATS',  # Update with actual table name
+        #     'skill_filter': 'gpt_mv_prospect',
+        #     'bot_filter': 'bot'
+        # },
         'Delighters': {
             'bot_skills': ['GPT_MV_DELIGHTERS'],
             'agent_skills': ['MV_RESOLVERS_SENIORS', 'MV_CALLERS','MV_RESOLVERS_MANAGER','GPT_MV_RESOLVERS_SHADOWERS','GPT_MV_RESOLVERS_SHADOWERS_MANAGER','Pre_R_Visa_Retention'],
@@ -626,15 +626,14 @@ def get_snowflake_departments_config():
             'skill_filter': 'GPT_CC_DELIGHTERS',
             'bot_filter': 'bot'            
 
-
         },
-        'Doctors': {
-            'bot_skills': ['GPT_Doctors'],
-            'agent_skills': ['Doctor'],
-            'table_name': 'SILVER.CHAT_EVALS.DOCTORS_CHATS',  # Update with actual table name
-            'skill_filter': 'gpt_doctors',
-            'bot_filter': 'bot'
-        },
+        # 'Doctors': {
+        #     'bot_skills': ['GPT_Doctors'],
+        #     'agent_skills': ['Doctor'],
+        #     'table_name': 'SILVER.CHAT_EVALS.DOCTORS_CHATS',  # Update with actual table name
+        #     'skill_filter': 'gpt_doctors',
+        #     'bot_filter': 'bot'
+        # },
         'AT_Filipina': {
             'bot_skills': [
                'Filipina_in_PHl_Pending_Valid_Visa','Filipina_in_PHl_Pending_valid_visa','Filipina_Outside_Pending_Facephoto',
@@ -4563,6 +4562,20 @@ def analyze_guardrail_missed_tools(session, df, department_name, target_date):
                 last_customer_message = ''
                 guardrail_output_json = {}
                 
+                # Find the last execution_id before this guardrail message (from dept skills)
+                conv_messages = df[
+                    (df['CONVERSATION_ID'] == conv_id) & 
+                    (df['MESSAGE_SENT_TIME'] < message_time)
+                ].sort_values('MESSAGE_SENT_TIME', ascending=False)
+                
+                for _, prev_msg in conv_messages.iterrows():
+                    prev_execution_id = prev_msg.get('EXECUTION_ID', '')
+                    prev_target_skill = prev_msg.get('TARGET_SKILL_PER_MESSAGE', '')
+                    
+                    if prev_execution_id and prev_target_skill in all_dept_skills:
+                        execution_id = prev_execution_id
+                        break
+                
                 # Extract GPT Response (between "GPT RESPONSE CAUGHT:" and "LAST CUSTOMER MESSAGE:")
                 gpt_response_match = re.search(
                     r'GPT RESPONSE CAUGHT:\s*(.+?)(?=LAST CUSTOMER MESSAGE:|Guardrail Output:|$)',
@@ -4571,23 +4584,6 @@ def analyze_guardrail_missed_tools(session, df, department_name, target_date):
                 )
                 if gpt_response_match:
                     gpt_response_caught = gpt_response_match.group(1).strip()
-                    
-                    # Try to find the actual GPT response message in the conversation to get EXECUTION_ID
-                    # Search for messages that contain this GPT response content
-                    conv_messages = df[df['CONVERSATION_ID'] == conv_id]
-                    for _, response_msg in conv_messages.iterrows():
-                        try:
-                            response_text = response_msg.get('TEXT', '')
-                            # Check if this message contains part of the GPT response
-                            # (use first 100 chars to avoid issues with formatting differences)
-                            gpt_response_sample = gpt_response_caught[:100].strip()
-                            if gpt_response_sample and gpt_response_sample in response_text:
-                                # Found the GPT response message - extract EXECUTION_ID
-                                execution_id = response_msg.get('EXECUTION_ID', '')
-                                if execution_id:
-                                    break
-                        except:
-                            continue
                 
                 # Extract Last Customer Message (between "LAST CUSTOMER MESSAGE:" and "Guardrail Output:")
                 customer_msg_match = re.search(
@@ -5994,7 +5990,7 @@ def generate_tool_usage_analysis(session, department_name, target_date):
 def compute_chat_initiation_breakdown(session, df, table_name, target_date, dept_name):
     """
     Compute how many conversations in the 'Chats Supposed to be Bot Handled' pool
-    were initiated by us vs by the client.
+    were initiated by us vs by the client, plus unique client counts.
 
     Classification logic:
       - First message SENT_BY != 'consumer'  →  Initiated by Us
@@ -6004,9 +6000,8 @@ def compute_chat_initiation_breakdown(session, df, table_name, target_date, dept
             →  Initiated by Us  (client is answering our broadcast)
             Otherwise  →  Initiated by Client
 
-    The consumer identifier column is discovered dynamically via INFORMATION_SCHEMA.
-    If no identifier column exists the 24-hour broadcast check is skipped and
-    classification falls back to first-message SENT_BY only.
+    Uses CLIENT_ID column for client identification and unique client counting.
+    If CLIENT_ID is not present, 24-hour broadcast check and unique client counts are skipped.
 
     Args:
         session:      Snowflake session
@@ -6016,7 +6011,9 @@ def compute_chat_initiation_breakdown(session, df, table_name, target_date, dept
         dept_name:    Department name (for logging)
 
     Returns:
-        tuple: (chats_initiated_by_us: int, chats_initiated_by_client: int)
+        tuple: (chats_initiated_by_us: int, chats_initiated_by_client: int, 
+                total_unique_clients: int, unique_clients_initiated_by_us: int,
+                unique_clients_initiated_by_client: int)
     """
     print(f"    🔍 Computing chat initiation breakdown for {dept_name}...")
 
@@ -6042,43 +6039,13 @@ def compute_chat_initiation_breakdown(session, df, table_name, target_date, dept
     initiated_by_us_ids = set(first_msgs.loc[us_mask, 'CONVERSATION_ID'])
     consumer_initiated_ids = set(first_msgs.loc[consumer_mask, 'CONVERSATION_ID'])
 
-    # ── Step 2: Discover the consumer identifier column ──────────────────────
-    consumer_id_col = None
-    try:
-        # Handle fully-qualified table names like SCHEMA.DB.TABLE or DB.TABLE
-        raw_table = table_name.split('.')[-1].upper()
-        raw_schema = table_name.split('.')[-2].upper() if '.' in table_name else None
-
-        candidate_cols = ['CONSUMER_ID', 'CONTACT_ID', 'PHONE_NUMBER', 'CLIENT_ID', 'CUSTOMER_ID']
-        candidates_sql = ", ".join(f"'{c}'" for c in candidate_cols)
-
-        schema_filter = f"AND TABLE_SCHEMA = '{raw_schema}'" if raw_schema else ""
-        col_query = f"""
-        SELECT COLUMN_NAME
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = '{raw_table}'
-        {schema_filter}
-        AND COLUMN_NAME IN ({candidates_sql})
-        ORDER BY CASE COLUMN_NAME
-            WHEN 'CONSUMER_ID'   THEN 1
-            WHEN 'CONTACT_ID'    THEN 2
-            WHEN 'PHONE_NUMBER'  THEN 3
-            WHEN 'CLIENT_ID'     THEN 4
-            WHEN 'CUSTOMER_ID'   THEN 5
-            ELSE 6
-        END
-        LIMIT 1
-        """
-        col_result = session.sql(col_query).collect()
-        if col_result:
-            consumer_id_col = col_result[0]['COLUMN_NAME']
-            print(f"    ✅ Consumer identifier column found: {consumer_id_col}")
-        else:
-            print(f"    ⚠️  No consumer identifier column found in {table_name}. "
-                  f"24-hour broadcast check will be skipped.")
-    except Exception as e:
-        print(f"    ⚠️  Could not query INFORMATION_SCHEMA: {e}. "
-              f"24-hour broadcast check will be skipped.")
+    # ── Step 2: Use CLIENT_ID column for consumer identification ────────────
+    consumer_id_col = 'CLIENT_ID'
+    
+    if consumer_id_col not in df.columns:
+        print(f"    ⚠️  Column '{consumer_id_col}' not found in dataframe. "
+              f"Unique client counts will be 0 and 24-hour broadcast check will be skipped.")
+        consumer_id_col = None
 
     # ── Step 3: 24-hour broadcast re-classification ───────────────────────────
     if consumer_id_col and consumer_initiated_ids:
@@ -6157,32 +6124,87 @@ def compute_chat_initiation_breakdown(session, df, table_name, target_date, dept
     chats_initiated_by_us     = len(initiated_by_us_ids)
     chats_initiated_by_client = len(consumer_initiated_ids)
 
-    # ── Step 4: Validation print ──────────────────────────────────────────────
+    # ── Step 4: Calculate unique clients ──────────────────────────────────────
+    # Each client is classified based on their FIRST conversation only (by time),
+    # so every client lands in exactly one category and the counts are summable.
+    total_unique_clients = 0
+    unique_clients_initiated_by_us = 0
+    unique_clients_initiated_by_client = 0
+
+    if consumer_id_col and consumer_id_col in df.columns:
+        # Build a mapping: CLIENT_ID → earliest conversation start time
+        client_first_conv = (
+            df[df[consumer_id_col].notna()]
+            .groupby(consumer_id_col)['MESSAGE_SENT_TIME']
+            .min()
+            .reset_index()
+            .rename(columns={'MESSAGE_SENT_TIME': 'FIRST_MSG_TIME'})
+        )
+
+        # For each client, find which conversation ID that earliest message belongs to
+        df_sorted = df[df[consumer_id_col].notna()].sort_values('MESSAGE_SENT_TIME')
+        client_first_conv_id = (
+            df_sorted
+            .groupby(consumer_id_col)['CONVERSATION_ID']
+            .first()
+            .reset_index()
+            .rename(columns={'CONVERSATION_ID': 'FIRST_CONV_ID'})
+        )
+
+        # Classify each client by their first conversation's initiation type
+        client_first_conv_id['INITIATION_TYPE'] = client_first_conv_id['FIRST_CONV_ID'].apply(
+            lambda cid: 'us' if cid in initiated_by_us_ids else 'client'
+        )
+
+        total_unique_clients = len(client_first_conv_id)
+        unique_clients_initiated_by_us = (client_first_conv_id['INITIATION_TYPE'] == 'us').sum()
+        unique_clients_initiated_by_client = (client_first_conv_id['INITIATION_TYPE'] == 'client').sum()
+
+        print(f"    ✅ Unique clients classified by first conversation (column: {consumer_id_col})")
+    elif consumer_id_col and consumer_id_col not in df.columns:
+        print(f"    ⚠️  Column '{consumer_id_col}' not present in filtered dataframe; unique client counts will be 0")
+
+    # ── Step 5: Validation print ──────────────────────────────────────────────
     sum_check = chats_initiated_by_us + chats_initiated_by_client
     checkmark = '✓' if sum_check == total else '✗  ← MISMATCH!'
     print(f"\n    ═══════════════════════════════════════════════")
     print(f"    [INITIATION BREAKDOWN - {dept_name}]")
-    print(f"      Consumer ID column used : {consumer_id_col or 'NONE (no 24h broadcast check)'}")
+    print(f"      Client ID column        : {consumer_id_col or 'NOT FOUND (unique client counts = 0)'}")
     print(f"      Total supposed-to-be-bot-handled : {total}")
     print(f"      Initiated by Us         : {chats_initiated_by_us}")
     print(f"      Initiated by Client     : {chats_initiated_by_client}")
     print(f"      Sum check: {sum_check} == {total}  {checkmark}")
+    print(f"")
+    clients_sum = unique_clients_initiated_by_us + unique_clients_initiated_by_client
+    clients_checkmark = '✓' if clients_sum == total_unique_clients else '✗  ← MISMATCH!'
+    print(f"      Total Unique Clients           : {total_unique_clients}")
+    print(f"      Unique Clients (Initiated by Us)     : {unique_clients_initiated_by_us}")
+    print(f"      Unique Clients (Initiated by Client) : {unique_clients_initiated_by_client}")
+    print(f"      Clients sum check: {unique_clients_initiated_by_us} + {unique_clients_initiated_by_client} = {clients_sum} == {total_unique_clients}  {clients_checkmark}")
     print(f"    ═══════════════════════════════════════════════\n")
 
-    # ── Step 5: Save per-conversation raw data to Snowflake ───────────────────
+    # ── Step 6: Save per-conversation raw data to Snowflake ───────────────────
     try:
         raw_rows = []
+        
+        # Build conversation to client mapping
+        conv_to_client = {}
+        if consumer_id_col and consumer_id_col in df.columns:
+            conv_to_client = df.groupby('CONVERSATION_ID')[consumer_id_col].first().to_dict()
+        
         for conv_id in initiated_by_us_ids:
             raw_rows.append({
                 'CONVERSATION_ID': conv_id,
                 'INITIATION_TYPE': 'Initiated by Us',
-                'BROADCAST_RECLASSIFIED': False
+                'BROADCAST_RECLASSIFIED': False,
+                'CLIENT_ID': conv_to_client.get(conv_id, None)
             })
         for conv_id in consumer_initiated_ids:
             raw_rows.append({
                 'CONVERSATION_ID': conv_id,
                 'INITIATION_TYPE': 'Initiated by Client',
-                'BROADCAST_RECLASSIFIED': False
+                'BROADCAST_RECLASSIFIED': False,
+                'CLIENT_ID': conv_to_client.get(conv_id, None)
             })
 
         # Mark conversations that were re-classified due to broadcast (only
@@ -6202,7 +6224,7 @@ def compute_chat_initiation_breakdown(session, df, table_name, target_date, dept
 
         if raw_rows:
             raw_df = pd.DataFrame(raw_rows)
-            columns = ['CONVERSATION_ID', 'INITIATION_TYPE', 'BROADCAST_RECLASSIFIED']
+            columns = ['CONVERSATION_ID', 'INITIATION_TYPE', 'BROADCAST_RECLASSIFIED', 'CLIENT_ID']
             insert_raw_data_with_cleanup(
                 session=session,
                 table_name='CHAT_INITIATION_RAW_DATA',
@@ -6215,7 +6237,9 @@ def compute_chat_initiation_breakdown(session, df, table_name, target_date, dept
     except Exception as e:
         print(f"    ⚠️  Failed to save CHAT_INITIATION_RAW_DATA: {e}")
 
-    return chats_initiated_by_us, chats_initiated_by_client
+    return (chats_initiated_by_us, chats_initiated_by_client, 
+            total_unique_clients, unique_clients_initiated_by_us, 
+            unique_clients_initiated_by_client)
 
 
 def analyze_bot_handled_conversations_single_department(session, df, department_name, departments_config, target_date):
@@ -6403,6 +6427,9 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'mcd_cc_transfer_count': 0,
             'chats_initiated_by_us_count': 0,
             'chats_initiated_by_client_count': 0,
+            'total_unique_clients_count': 0,
+            'unique_clients_initiated_by_us_count': 0,
+            'unique_clients_initiated_by_client_count': 0,
             'wrong_number_clients_count': wrong_number_clients_count
         }
         
@@ -6417,7 +6444,9 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     # ── Chat initiation breakdown (Initiated by Us vs Initiated by Client) ──
     dept_config = departments_config.get(department_name, {})
     _table_name = dept_config.get('table_name', '')
-    chats_initiated_by_us_count, chats_initiated_by_client_count = compute_chat_initiation_breakdown(
+    (chats_initiated_by_us_count, chats_initiated_by_client_count, 
+     total_unique_clients_count, unique_clients_initiated_by_us_count, 
+     unique_clients_initiated_by_client_count) = compute_chat_initiation_breakdown(
         session, df, _table_name, target_date, department_name
     )
     
@@ -6868,6 +6897,9 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'mcd_cc_transfer_count': mcd_cc_transfer_count,
         'chats_initiated_by_us_count': chats_initiated_by_us_count,
         'chats_initiated_by_client_count': chats_initiated_by_client_count,
+        'total_unique_clients_count': total_unique_clients_count,
+        'unique_clients_initiated_by_us_count': unique_clients_initiated_by_us_count,
+        'unique_clients_initiated_by_client_count': unique_clients_initiated_by_client_count,
         'wrong_number_clients_count': wrong_number_clients_count
     }
     
@@ -8385,6 +8417,9 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'Chats_Supposed_to_be_Bot_Handled': None,
             'CHATS_INITIATED_BY_US':     None,
             'CHATS_INITIATED_BY_CLIENT': None,
+            'TOTAL_UNIQUE_CLIENTS': None,
+            'UNIQUE_CLIENTS_INITIATED_BY_US': None,
+            'UNIQUE_CLIENTS_INITIATED_BY_CLIENT': None,
             
             # Analysis Metadata
             'Analysis_Date': datetime.now().strftime('%Y-%m-%d'),
@@ -8557,6 +8592,9 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'Chats_Supposed_to_be_Bot_Handled': 'NUMBER',
                 'CHATS_INITIATED_BY_US': 'NUMBER',
                 'CHATS_INITIATED_BY_CLIENT': 'NUMBER',
+                'TOTAL_UNIQUE_CLIENTS': 'NUMBER',
+                'UNIQUE_CLIENTS_INITIATED_BY_US': 'NUMBER',
+                'UNIQUE_CLIENTS_INITIATED_BY_CLIENT': 'NUMBER',
                 'Excluded_No_Engagement_Chats': 'NUMBER',
                 'Excluded_No_Bot_Skill_Chats': 'NUMBER',
                 'Excluded_Hi_Bye_Chats': 'NUMBER',
@@ -8770,6 +8808,9 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'MCD_CC_TRANSFER_COUNT':         'NUMBER',
                 'CHATS_INITIATED_BY_US':         'NUMBER',
                 'CHATS_INITIATED_BY_CLIENT':     'NUMBER',
+                'TOTAL_UNIQUE_CLIENTS':          'NUMBER',
+                'UNIQUE_CLIENTS_INITIATED_BY_US': 'NUMBER',
+                'UNIQUE_CLIENTS_INITIATED_BY_CLIENT': 'NUMBER',
                 'WRONG_NUMBER_CLIENTS_COUNT':    'NUMBER',
             }
             for df_col, col_type in new_col_type_map.items():
@@ -11771,6 +11812,9 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             # Initiation breakdown: how the chats in Chats_Supposed_to_be_Bot_Handled were started
             'CHATS_INITIATED_BY_US':     bot_data.get('chats_initiated_by_us_count', 0),
             'CHATS_INITIATED_BY_CLIENT': bot_data.get('chats_initiated_by_client_count', 0),
+            'TOTAL_UNIQUE_CLIENTS': bot_data.get('total_unique_clients_count', 0),
+            'UNIQUE_CLIENTS_INITIATED_BY_US': bot_data.get('unique_clients_initiated_by_us_count', 0),
+            'UNIQUE_CLIENTS_INITIATED_BY_CLIENT': bot_data.get('unique_clients_initiated_by_client_count', 0),
             # Exclusion breakdown: chats removed on the way from ChatCC to Chats_Supposed_to_be_Bot_Handled
             'Excluded_No_Engagement_Chats': excluded_no_engagement,
             'Excluded_No_Bot_Skill_Chats':  excluded_no_bot_skill,
