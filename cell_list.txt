@@ -1,0 +1,46 @@
+﻿Cell 00 [code]: # Cell 1 ΓÇö Session & sanity -- testing
+Cell 01 [code]: # Your entire Python code goes here - just copy/paste the whole file content
+Cell 02 [code]: def main(session: snowpark.Session):
+Cell 03 [code]: target_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+Cell 04 [code]: -- CC_Sales transfers now come from BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS
+Cell 05 [code]: # CC_Sales: fetch each transfer sub-type via individual SQL queries
+Cell 06 [code]: df_MV
+Cell 07 [code]: # CC_Sales: assign named aliases from the individual query DataFrames (cell4)
+Cell 08 [code]: # ΓöÇΓöÇ CC_Sales: Shadower sub-breakdown ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+Cell 09 [code]: def get_cc_sales_transfer_wide_format(denominator: int) -> pd.DataFrame:
+Cell 10 [code]: total_transfers_CC
+Cell 11 [code]: def count_transfer_reasons(df: pd.DataFrame, text_column: str = 'TEXT',dept='MV_Sales'):
+Cell 12 [code]: # result_df_CC = get_transfer_reason_dataframe(df_CC,'TEXT','CC_Sales')
+Cell 13 [code]: # result_df_CC
+Cell 14 [code]: result_df_MV
+Cell 15 [code]: def get_transfer_reason_wide_format(transfer_df: pd.DataFrame, denominator: int,total_transfers:int) -> pd.DataFrame:
+Cell 16 [code]: # CC_Sales: use new function (reads sub-breakdown counters already in scope)
+Cell 17 [code]: df_MV
+Cell 18 [code]: query_MV=f"""
+Cell 19 [code]: df_CC['discounts_offered']=count_discount_CC
+Cell 20 [code]: df_CC['discounts_offered_PCT']=round((count_discount_CC/unique_prospects_cc)*100,2)
+Cell 21 [code]: # df_CC total_transfers already set inside get_cc_sales_transfer_wide_format()
+Cell 22 [code]: # df_CC total_transfers_pct already set inside get_cc_sales_transfer_wide_format()
+Cell 23 [code]: # df_CC no longer has out_of_scope_count (new CC_Sales transfer schema)
+Cell 24 [code]: df_CC
+Cell 25 [code]: df_MV
+Cell 26 [code]: # df_CC: no out_of_scope adjustment needed (new schema separates to_other_depts)
+Cell 27 [code]: # df_CC: no recalculation needed (pct already set in get_cc_sales_transfer_wide_format)
+Cell 28 [code]: df_CC
+Cell 29 [code]: # Initialize the client for chat analysis
+Cell 30 [code]: # ΓöÇΓöÇ CC_Sales: align df_CC columns to the full table schema ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+Cell 31 [code]: dynamic_columns = [col for col in df_CC.columns if col not in ['DATE', 'DEPARTMENT', 'TIMESTAMP']]
+Cell 32 [code]: df_MV.columns = [col.upper() for col in df_MV.columns]
+Cell 33 [code]: # """
+Cell 34 [code]: # results = get_mv_resolvers_metrics(session, '2026-02-06')
+Cell 35 [code]: # ΓöÇΓöÇ Run Code-Based Evals: multiple_contract_detector ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+Cell 36 [code]: import streamlit as st
+Cell 37 [code]: # ΓöÇΓöÇ Run DDC Analytics Pipeline ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+Cell 38 [code]: import streamlit as st
+Cell 39 [code]: # ΓöÇΓöÇ Run cleaners (Part Time) Analytics Pipeline ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+Cell 40 [code]: import streamlit as st
+Cell 41 [code]: # # Task 39 - Prospect Nationality Service code-based metrics
+Cell 42 [code]: # # Execute Prospect code-based metrics and upsert summary row
+Cell 43 [code]: # MV_RESOLVERS_CONFIG = {
+Cell 44 [code]: # get_mv_resolvers_metrics(session, '2026-03-31','MV_Delighters')
+Cell 45 [code]: (empty)

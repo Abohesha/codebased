@@ -1,0 +1,404 @@
+﻿=== Cell 38 ===
+import streamlit as st
+
+# ΓöÇΓöÇ Config ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+_dept_ddc    = 'DDC'
+_tdate_ddc   = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+_master_tbl  = globals().get('MASTER_METRICS_TABLE', 'EVALS_SUMMARY_2_test_only')
+
+# ΓöÇΓöÇ Fetch all DDC metrics from the master metrics table in one query ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+_metrics_q = f"""
+SELECT
+    -- Volumes
+    CHATS_SUPPOSED_TO_BE_BOT_HANDLED,
+    BOT_HANDLED_COUNT,
+    BOT_HANDLED_PERCENTAGE,
+
+    -- Call Requests
+    CALL_REQUESTS_COUNT,
+    CALL_REQUESTS_PERCENTAGE,
+
+    -- Agent Messages
+    CHATS_WITH_1_PLUS_AGENT_MESSAGES,
+    CHATS_WITH_1_PLUS_AGENT_MESSAGES_PERCENTAGE,
+    CHATS_WITH_2_PLUS_AGENT_MESSAGES,
+    CHATS_WITH_2_PLUS_AGENT_MESSAGES_PERCENTAGE,
+    CHATS_WITH_3_PLUS_AGENT_MESSAGES,
+    CHATS_WITH_3_PLUS_AGENT_MESSAGES_PERCENTAGE,
+    CHATS_WITH_EXACTLY_2_AGENT_MESSAGES,
+    CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE,
+
+    -- Tech Failures
+    TECH_ERROR_TRANSFERS_COUNT,
+    TECH_ERROR_TRANSFERS_PERCENTAGE,
+
+    -- Delays (Method 1 ΓÇö primary)
+    METHOD1_AVG_INITIAL_DELAY_SECONDS,
+    METHOD1_AVG_NON_INITIAL_DELAY_SECONDS
+
+FROM LLM_EVAL.PUBLIC.{_master_tbl}
+WHERE UPPER(DEPARTMENT) = '{_dept_ddc.upper()}'
+  AND DATE = '{_tdate_ddc}'
+ORDER BY TIMESTAMP DESC
+LIMIT 1
+"""
+
+try:
+    _df_ddc = session.sql(_metrics_q).to_pandas()
+except Exception as _ex:
+    _df_ddc = pd.DataFrame()
+    st.error(f"Could not query master metrics table: {_ex}")
+
+def _val(col, default=0):
+    if _df_ddc.empty or col not in _df_ddc.columns:
+        return default
+    v = _df_ddc[col].iloc[0]
+    return default if (v is None or (isinstance(v, float) and pd.isna(v))) else v
+
+# ΓöÇΓöÇ Derived values ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+chats_supposed   = _val('CHATS_SUPPOSED_TO_BE_BOT_HANDLED')
+bot_handled      = _val('BOT_HANDLED_COUNT')
+bot_handled_pct  = _val('BOT_HANDLED_PERCENTAGE')
+call_req         = _val('CALL_REQUESTS_COUNT')
+call_req_pct     = _val('CALL_REQUESTS_PERCENTAGE')
+agent_1plus      = _val('CHATS_WITH_1_PLUS_AGENT_MESSAGES')
+agent_1plus_pct  = _val('CHATS_WITH_1_PLUS_AGENT_MESSAGES_PERCENTAGE')
+agent_2plus      = _val('CHATS_WITH_2_PLUS_AGENT_MESSAGES')
+agent_2plus_pct  = _val('CHATS_WITH_2_PLUS_AGENT_MESSAGES_PERCENTAGE')
+agent_exact2     = _val('CHATS_WITH_EXACTLY_2_AGENT_MESSAGES')
+agent_exact2_pct = _val('CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE')
+agent_3plus      = _val('CHATS_WITH_3_PLUS_AGENT_MESSAGES')
+agent_3plus_pct  = _val('CHATS_WITH_3_PLUS_AGENT_MESSAGES_PERCENTAGE')
+tech_fail        = _val('TECH_ERROR_TRANSFERS_COUNT')
+tech_fail_pct    = _val('TECH_ERROR_TRANSFERS_PERCENTAGE')
+delay_init       = _val('METHOD1_AVG_INITIAL_DELAY_SECONDS', 0.0)
+delay_non_init   = _val('METHOD1_AVG_NON_INITIAL_DELAY_SECONDS', 0.0)
+
+def _fmt_delay(secs):
+    secs = float(secs)
+    if secs == 0:
+        return "ΓÇö"
+    m, s = divmod(int(secs), 60)
+    return f"{m}m {s}s" if m else f"{s}s"
+
+# ΓöÇΓöÇ Layout ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+=== Cell 39 ===
+# ΓöÇΓöÇ Run cleaners (Part Time) Analytics Pipeline ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# Runs the complete standard pipeline for cleaners only (reuses existing implementation).
+# Metrics computed:
+#   1.  Perfect Chats / Fully Handled By Bot ΓåÆ BOT_HANDLED_COUNT
+#   2.  Chats Supposed to be Bot-Handled     ΓåÆ CHATS_SUPPOSED_TO_BE_BOT_HANDLED
+#   3.  Chats with ΓëÑ1 Agent Message          ΓåÆ CHATS_WITH_1_PLUS_AGENT_MESSAGES
+#       ΓööΓöÇ At Least 2 Agent Messages         ΓåÆ CHATS_WITH_2_PLUS_AGENT_MESSAGES
+#       ΓööΓöÇ At Least 3 Agent Messages         ΓåÆ CHATS_WITH_3_PLUS_AGENT_MESSAGES
+#       ΓööΓöÇ Exactly 2 Agent Messages          ΓåÆ CHATS_WITH_EXACTLY_2_AGENT_MESSAGES
+#   4.  Technical API Failure                ΓåÆ TECH_ERROR_TRANSFERS_COUNT
+#   5.  Avg Delay ΓÇô Initial Msg              ΓåÆ METHOD1_AVG_INITIAL_DELAY_SECONDS
+#   6.  Avg Delay ΓÇô Non-Initial Msg          ΓåÆ METHOD1_AVG_NON_INITIAL_DELAY_SECONDS
+
+# Temporarily override globals for cleaners-only run
+_prev_dept_filter_cl = globals().get('DEPARTMENT_FILTER', None)
+_prev_test_cl        = globals().get('TEST', False)
+MASTER_METRICS_TABLE = globals().get('MASTER_METRICS_TABLE', 'EVALS_SUMMARY_2_test_only')
+
+DEPARTMENT_FILTER = "cleaners"
+TEST = True
+
+target_date_cleaners = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+print(f"≡ƒÜÇ Running analytics pipeline for: {DEPARTMENT_FILTER}")
+print(f"≡ƒôà Target date: {target_date_cleaners}")
+print("=" * 55)
+
+try:
+    result_cleaners = phase3_advanced_analytics_processor(session, target_date_cleaners)
+    print(result_cleaners['summary'])
+finally:
+    # Always restore globals so the full pipeline is not affected
+    DEPARTMENT_FILTER = _prev_dept_filter_cl
+    TEST = _prev_test_cl
+
+=== Cell 40 ===
+import streamlit as st
+
+# ΓöÇΓöÇ Config ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+_dept_cl    = 'cleaners'
+_tdate_cl   = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+_master_tbl_cl = globals().get('MASTER_METRICS_TABLE', 'EVALS_SUMMARY_2_test_only')
+
+# ΓöÇΓöÇ Fetch all cleaners metrics from the master metrics table in one query ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+_metrics_q_cl = f"""
+SELECT
+    -- Volumes
+    CHATS_SUPPOSED_TO_BE_BOT_HANDLED,
+    BOT_HANDLED_COUNT,
+    BOT_HANDLED_PERCENTAGE,
+
+    -- Agent Messages
+    CHATS_WITH_1_PLUS_AGENT_MESSAGES,
+    CHATS_WITH_1_PLUS_AGENT_MESSAGES_PERCENTAGE,
+    CHATS_WITH_2_PLUS_AGENT_MESSAGES,
+    CHATS_WITH_2_PLUS_AGENT_MESSAGES_PERCENTAGE,
+    CHATS_WITH_3_PLUS_AGENT_MESSAGES,
+    CHATS_WITH_3_PLUS_AGENT_MESSAGES_PERCENTAGE,
+    CHATS_WITH_EXACTLY_2_AGENT_MESSAGES,
+    CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE,
+
+    -- Tech Failures
+    TECH_ERROR_TRANSFERS_COUNT,
+    TECH_ERROR_TRANSFERS_PERCENTAGE,
+
+    -- Delays (Method 1 ΓÇö primary)
+    METHOD1_AVG_INITIAL_DELAY_SECONDS,
+    METHOD1_AVG_NON_INITIAL_DELAY_SECONDS
+
+FROM LLM_EVAL.PUBLIC.{_master_tbl_cl}
+WHERE UPPER(DEPARTMENT) = '{_dept_cl.upper()}'
+  AND DATE = '{_tdate_cl}'
+ORDER BY TIMESTAMP DESC
+LIMIT 1
+"""
+
+try:
+    _df_cl = session.sql(_metrics_q_cl).to_pandas()
+except Exception as _ex:
+    _df_cl = pd.DataFrame()
+    st.error(f"Could not query master metrics table: {_ex}")
+
+def _val_cl(col, default=0):
+    if _df_cl.empty or col not in _df_cl.columns:
+        return default
+    v = _df_cl[col].iloc[0]
+    return default if (v is None or (isinstance(v, float) and pd.isna(v))) else v
+
+# ΓöÇΓöÇ Derived values ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+cl_chats_supposed   = _val_cl('CHATS_SUPPOSED_TO_BE_BOT_HANDLED')
+cl_bot_handled      = _val_cl('BOT_HANDLED_COUNT')
+cl_bot_handled_pct  = _val_cl('BOT_HANDLED_PERCENTAGE')
+cl_agent_1plus      = _val_cl('CHATS_WITH_1_PLUS_AGENT_MESSAGES')
+cl_agent_1plus_pct  = _val_cl('CHATS_WITH_1_PLUS_AGENT_MESSAGES_PERCENTAGE')
+cl_agent_2plus      = _val_cl('CHATS_WITH_2_PLUS_AGENT_MESSAGES')
+cl_agent_2plus_pct  = _val_cl('CHATS_WITH_2_PLUS_AGENT_MESSAGES_PERCENTAGE')
+cl_agent_3plus      = _val_cl('CHATS_WITH_3_PLUS_AGENT_MESSAGES')
+cl_agent_3plus_pct  = _val_cl('CHATS_WITH_3_PLUS_AGENT_MESSAGES_PERCENTAGE')
+cl_agent_exact2     = _val_cl('CHATS_WITH_EXACTLY_2_AGENT_MESSAGES')
+cl_agent_exact2_pct = _val_cl('CHATS_WITH_EXACTLY_2_AGENT_MESSAGES_PERCENTAGE')
+cl_tech_fail        = _val_cl('TECH_ERROR_TRANSFERS_COUNT')
+cl_tech_fail_pct    = _val_cl('TECH_ERROR_TRANSFERS_PERCENTAGE')
+cl_delay_init       = _val_cl('METHOD1_AVG_INITIAL_DELAY_SECONDS', 0.0)
+cl_delay_non_init   = _val_cl('METHOD1_AVG_NON_INITIAL_DELAY_SECONDS', 0.0)
+
+def _fmt_delay_cl(secs):
+    secs = float(secs)
+    if secs == 0:
+        return "ΓÇö"
+    m, s = divmod(int(secs), 60)
+    return f"{m}m {s}s" if m else f"{s}s"
+
+# ΓöÇΓöÇ Layout ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+st.title("≡ƒº╣ Part Time (Cle
+
+=== Cell 41 ===
+# # Task 39 - Prospect Nationality Service code-based metrics
+# import json
+# import re
+# import uuid
+# from datetime import datetime
+
+# import pandas as pd
+
+# PROSPECT_DEPARTMENT = 'Prospect_Nationality_Service'
+# PROSPECT_SKILL = 'SALES_NATIONALITY_SERVICE_IDENTIFICATION'
+# PROSPECT_SOURCE_TABLE = 'SILVER.CHAT_EVALS.CC_SALES_CHATS'
+# PROSPECT_SUMMARY_TABLE = 'LLM_EVAL.PUBLIC.PROSPECT_NATIONALITY_SERVICE_SUMMARY'
+
+
+# def _prospect_safe_json_parse(value):
+#     if value is None:
+#         return None
+#     if isinstance(value, dict):
+#         return value
+#     if not isinstance(value, str):
+#         return None
+
+#     text = value.strip()
+#     if not text:
+#         return None
+
+#     if text.startswith('```'):
+#         text = re.sub(r'^```(?:json)?\s*', '', text)
+#         text = re.sub(r'\s*```$', '', text)
+
+#     try:
+#         parsed = json.loads(text)
+#         return parsed if isinstance(parsed, dict) else None
+#     except Exception:
+#         return None
+
+
+# def _prospect_normalize_destination(value):
+#     if value is None:
+#         return None
+#     text = str(value).strip().upper()
+#     if not text:
+#         return None
+
+#     compact = re.sub(r'[^A-Z_]', '', text)
+
+#     if compact == 'CC':
+#         return 'CC'
+#     if compact == 'MV':
+#         return 'MV'
+#     if compact in {'UNKNOWN_IDENTIFIER', 'UNKNOWNIDENTIFIER', 'USER_IDENTIFICATION', 'USERIDENTIFICATION'}:
+#         return 'UNKNOWN_IDENTIFIER'
+#     if compact in {'NO_ROUTING_GCC', 'NOROUTINGGCC', 'NO_ROUTING'} or 'NO_ROUTING' in compact:
+#         return 'NO_ROUTING_GCC'
+
+#     return None
+
+
+# def _prospect_query_total_chats(session, target_date):
+#     q = f"""
+#     SELECT COUNT(DISTINCT CONVERSATION_ID) AS TOTAL_CHATS
+#     FROM {PROSPECT_SOURCE_TABLE}
+#     WHERE DATE(UPDATED_AT) = DATE('{target_date}')
+#       AND UPPER(TARGET_SKILL_PER_MESSAGE) = UPPER('{PROSPECT_SKILL}')
+#     """
+#     res = session.sql(q).collect()
+#     return int(res[0]['TOTAL_CHATS']) if res else 0
+
+
+# def _prospect_agent_involvement_metrics(session, target_date):
+#     q = f"""
+#     WITH in_scope_conversations AS (
+#         SELECT DISTINCT CONVERSATION_ID
+#         FROM {PROSPECT_SOURCE_TABLE}
+#         WHERE DATE(UPDATED_AT) = DATE('{target_date}')
+#           AND UPPER(TARGET_SKILL_PER_MESSAGE) = UPPER('{PROSPECT_SKILL}')
+#     )
+#     SELECT
+#         c.CONVERSATION_ID,
+#         c.MESSAGE_SEQ,
+#         c.SENT_BY,
+#         c.MESSAGE_TYPE,
+#         c.TARGET_SKILL_PER_MESSAGE,
+#         c.TEXT
+#     FROM {PROSPECT_SOURCE_TABLE} c
+#     JOIN in_scope_conversations s
+#       ON c.CONVERSATION_ID = s.CONVERSATION_ID
+#     WHERE DATE(c.UPDATED_AT) = DATE('{target_date}')
+#     ORDER BY c.CONVERSATION_ID, c.MESSAGE_SEQ
+#     """
+#     conv_df = session.sql(q).to_pandas()
+
+#     if conv_df.empty:
+#         summary = json.dumps({
+#             'total_chats': 0,
+#             'chats_with_agent': 0,
+#             'agent_involvement_percentage': 0.0,
+#             'methodology': 'helper + 
+
+=== Cell 42 ===
+# # Execute Prospect code-based metrics and upsert summary row
+# from datetime import datetime, timedelta
+# from zoneinfo import ZoneInfo
+
+# cairo_tz = ZoneInfo("Africa/Cairo")
+
+# if 'target_date' not in globals():
+#     target_date = (datetime.now(cairo_tz) - timedelta(days=1)).strftime('%Y-%m-%d')
+
+# prospect_code_metrics_df = run_prospect_code_based_metrics(session, target_date)
+# prospect_code_metrics_df
+
+=== Cell 43 ===
+# MV_RESOLVERS_CONFIG = {
+#     'bot_skills': [
+#         'GPT_MV_RESOLVERS'
+#     ],
+#     'agent_skills': ['MV_RESOLVERS_SENIORS', 'MV_CALLERS', 'MV_RESOLVERS_MANAGER', 
+#                            'GPT_MV_RESOLVERS_SHADOWERS', 'GPT_MV_RESOLVERS_SHADOWERS_MANAGER','Pre_R_Visa_Retention'],
+#     'table_name': 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS'
+# }
+
+# MV_DELIGHTERS_CONFIG = {
+#     'bot_skills': ['GPT_MV_DELIGHTERS'],
+#     'agent_skills': [
+#         'MV_RESOLVERS_SENIORS', 'MV_CALLERS','MV_RESOLVERS_MANAGER','GPT_MV_RESOLVERS_SHADOWERS','GPT_MV_RESOLVERS_SHADOWERS_MANAGER','Pre_R_Visa_Retention'
+#     ],
+#     'table_name': 'SILVER.CHAT_EVALS.DELIGHTERS_CHATS'
+# }
+
+# DEPARTMENT_CONFIGS = {
+#     'MV_Resolvers': MV_RESOLVERS_CONFIG,
+#     'MV_Delighters': MV_DELIGHTERS_CONFIG
+# }
+
+
+# def preprocess_dataframe(df):
+#     """Clean and preprocess the dataframe."""
+#     df.columns = [c.upper() for c in df.columns]
+#     string_columns = ['SENT_BY', 'MESSAGE_TYPE', 'TARGET_SKILL_PER_MESSAGE',
+#                      'THROUGH_SKILL', 'TEXT', 'SKILL']
+#     for col in string_columns:
+#         if col in df.columns:
+#             df[col] = df[col].astype(str).str.strip()
+#     return df
+
+
+# def is_conversation_fully_handled_by_bot(conversation_df, department_name='MV_Resolvers'):
+#     """
+#     Check if a conversation is fully handled by bot for the specified department.
+
+#     Args:
+#         conversation_df: DataFrame containing conversation messages
+#         department_name: Department name ('MV_Resolvers' or 'MV_Delighters')
+
+#     Returns:
+#         tuple: (is_bot_handled: bool, agent_message_count: int)
+#     """
+#     config = DEPARTMENT_CONFIGS.get(department_name, MV_RESOLVERS_CONFIG)
+#     all_skills = set(config['bot_skills'] + config['agent_skills'])
+
+#     agent_normal_messages = conversation_df[
+#         (conversation_df['SENT_BY'].str.upper() == 'AGENT') &
+#         (conversation_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE')
+#     ]
+
+#     agent_message_count = 0
+#     for _, message in agent_normal_messages.iterrows():
+#         message_skill = message['TARGET_SKILL_PER_MESSAGE']
+#         if message_skill in all_skills:
+#             agent_message_count += 1
+
+#     is_bot_handled = (agent_message_count == 0)
+#     return is_bot_handled, agent_message_count
+
+
+# def apply_day1_day2_filter(df, target_date):
+#     """
+#     Apply day1-day2 date filtering.
+#     Only keep conversations that have at least one message from day2 (target_date).
+#     """
+#     if isinstance(target_date, str):
+#         target_date_obj = datetime.strptime(target_date, '%Y-%m-%d')
+#     else:
+#         target_date_obj = target_date
+
+#     start_date = target_date_obj - timedelta(days=1)
+#     day1_date = start_date.date()
+#     day2_date = (start_date + timedelta(days=1)).date()
+
+#     print(f"  Day 1: {day1_date}, Day 2: {day2_date}")
+
+#     df = df.copy()
+#     df['MESSAGE_DATE'] = pd.to_datetime(df['MESSAGE_SENT_TIME']).dt.date
+
+#     conversations_b
+
+=== Cell 44 ===
+# get_mv_resolvers_metrics(session, '2026-03-31','MV_Delighters')
+
+=== Cell 45 ===
+
+
