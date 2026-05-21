@@ -611,7 +611,7 @@ def get_snowflake_departments_config():
         # },
         'Delighters': {
             'bot_skills': ['GPT_MV_DELIGHTERS'],
-            'agent_skills': ['MV_RESOLVERS_SENIORS', 'MV_CALLERS','MV_RESOLVERS_MANAGER','GPT_MV_RESOLVERS_SHADOWERS','GPT_MV_RESOLVERS_SHADOWERS_MANAGER','Pre_R_Visa_Retention'],
+            'agent_skills': ['MV_RESOLVERS_SENIORS', 'MV_CALLERS'],
             'table_name': 'SILVER.CHAT_EVALS.DELIGHTERS_CHATS',  # Update with actual table name
             'skill_filter': 'gpt_delighters',
             'bot_filter': 'bot'
@@ -2679,6 +2679,154 @@ def calculate_proactive_agent_messages_mv_resolvers(session, department_name, de
     except Exception as e:
         print(f"    ⚠️  Error calculating proactive agent metrics: {str(e)}")
         return 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+
+
+def calculate_total_chats_reached_mv_delighters(session, department_name, departments_config, target_date):
+    """
+    Count distinct conversations where the GPT_MV_DELIGHTERS bot actually sent at least one message
+    (TARGET_SKILL_PER_MESSAGE = 'GPT_MV_DELIGHTERS') for the Delighters department.
+
+    Different from Chats_Supposed_to_be_Bot_Handled, which is the Phase 1 routing pool.
+    """
+    try:
+        department_config = departments_config[department_name]
+        table_name = 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS'
+        filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        print(f"    🎯 Calculating total chats that reached MV Delighters bot for {department_name}...")
+
+        query = f"""
+        SELECT COUNT(DISTINCT conversation_id) AS total_reached
+        FROM {table_name}
+        WHERE target_skill_per_message = 'GPT_MV_DELIGHTERS'
+        AND date(updated_at) = '{filter_date}'
+        """
+
+        result = session.sql(query).collect()
+        total_reached = int(result[0]['TOTAL_REACHED']) if result and result[0]['TOTAL_REACHED'] is not None else 0
+
+        print(f"    ✅ Total chats that reached MV Delighters: {total_reached}")
+        return total_reached
+
+    except Exception as e:
+        print(f"    ⚠️  Error calculating total chats reached MV Delighters: {str(e)}")
+        return 0
+
+
+def calculate_delighters_to_resolvers_breakdown(session, department_name, departments_config, target_date):
+    """
+    Calculate the Delighters -> Resolvers breakdown for the Delighters department.
+
+    Walks each candidate conversation chronologically. A conversation matches the parent pattern
+    when the Delighters bot skill (from department config; e.g. 'GPT_MV_DELIGHTERS') appears in
+    TARGET_SKILL_PER_MESSAGE before a Resolvers agent skill (MV_RESOLVERS_SENIORS or MV_CALLERS).
+
+    Within the matched set:
+      - Tech-error sub-metric: conversations where any message TEXT contains 'Error Task:'
+      - Normal sub-metric (not tech-error) is split by the FIRST agent skill seen after the bot skill:
+          * MV_RESOLVERS_SENIORS -> normal_to_seniors
+          * MV_CALLERS           -> normal_to_callers
+
+    Math invariant:
+        total_count = tech_error_count + normal_to_seniors + normal_to_callers
+        normal_count = normal_to_seniors + normal_to_callers
+
+    Returns:
+        tuple: (total_count, normal_count, tech_error_count, normal_to_seniors_count, normal_to_callers_count)
+    """
+    try:
+        department_config = departments_config[department_name]
+        agent_skills = department_config['agent_skills']  # ['MV_RESOLVERS_SENIORS', 'MV_CALLERS']
+        bot_skills = department_config.get('bot_skills', ['GPT_MV_DELIGHTERS'])
+        table_name = 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS'
+
+        # Build a SQL OR clause + an upper-case Python set of bot skills to look for.
+        bot_skills_upper = [s.upper() for s in bot_skills]
+        through_skill_or = " OR ".join(
+            [f"through_skill ILIKE '%{s}%'" for s in bot_skills]
+        )
+
+        filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        print(f"    🔄 Calculating Delighters → Resolvers breakdown for {department_name}...")
+        print(f"       Bot skills: {bot_skills}")
+
+        query = f"""
+        SELECT *
+        FROM {table_name}
+        WHERE ({through_skill_or})
+        AND date(updated_at) = '{filter_date}'
+        """
+
+        result_df = session.sql(query).to_pandas()
+
+        total_count = 0
+        normal_count = 0
+        tech_error_count = 0
+        normal_to_seniors_count = 0
+        normal_to_callers_count = 0
+
+        def _is_bot_skill(skill_upper):
+            return any(bs in skill_upper for bs in bot_skills_upper)
+
+        if not result_df.empty:
+            for conv_id, conv_df in result_df.groupby('CONVERSATION_ID'):
+                conv_df_sorted = conv_df.sort_values('MESSAGE_SENT_TIME') if 'MESSAGE_SENT_TIME' in conv_df.columns else conv_df.sort_index()
+
+                found_pattern = False
+                found_bot_skill = False
+                first_agent_skill = None  # destination skill seen first after bot skill
+
+                for _, row in conv_df_sorted.iterrows():
+                    target_skill = str(row.get('TARGET_SKILL_PER_MESSAGE', '')).strip()
+
+                    if not target_skill:
+                        continue
+
+                    target_skill_upper = target_skill.upper()
+
+                    if _is_bot_skill(target_skill_upper):
+                        found_bot_skill = True
+                        continue
+
+                    if found_bot_skill:
+                        if 'MV_RESOLVERS_SENIORS' in target_skill_upper:
+                            first_agent_skill = 'MV_RESOLVERS_SENIORS'
+                            found_pattern = True
+                            break
+                        if 'MV_CALLERS' in target_skill_upper:
+                            first_agent_skill = 'MV_CALLERS'
+                            found_pattern = True
+                            break
+
+                if found_pattern:
+                    total_count += 1
+
+                    has_tech_error = (
+                        conv_df_sorted['TEXT'].astype(str).str.contains('Error Task:', case=False, na=False).any()
+                        if 'TEXT' in conv_df_sorted.columns else False
+                    )
+
+                    if has_tech_error:
+                        tech_error_count += 1
+                    else:
+                        normal_count += 1
+                        if first_agent_skill == 'MV_RESOLVERS_SENIORS':
+                            normal_to_seniors_count += 1
+                        elif first_agent_skill == 'MV_CALLERS':
+                            normal_to_callers_count += 1
+
+        print(f"    ✅ Delighters → Resolvers total: {total_count}")
+        print(f"       └─ Normal (non-tech-error): {normal_count}")
+        print(f"           └─ to MV_RESOLVERS_SENIORS: {normal_to_seniors_count}")
+        print(f"           └─ to MV_CALLERS:           {normal_to_callers_count}")
+        print(f"       └─ Tech error (within path): {tech_error_count}")
+
+        return total_count, normal_count, tech_error_count, normal_to_seniors_count, normal_to_callers_count
+
+    except Exception as e:
+        print(f"    ⚠️  Error calculating Delighters → Resolvers breakdown: {str(e)}")
+        return 0, 0, 0, 0, 0
 
 
 def calculate_total_seniors_callers(session, department_name, departments_config, target_date):
@@ -6265,6 +6413,12 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     other_bots_to_seniors_count = 0
     our_bot_to_seniors_count = 0
     delighters_to_seniors_count = 0
+    delighters_to_resolvers_normal_count = 0
+    # Delighters-specific intermediate counts (only set for the Delighters dept)
+    delighters_tech_error_in_path_count = 0
+    delighters_normal_to_seniors_count = 0
+    delighters_normal_to_callers_count = 0
+    delighters_unique_union_count = 0
     mv_bot_known_flow_transfer_count = 0
     mv_bot_tech_errors_transfers_count = 0
     mv_bot_guardrails_count = 0
@@ -6312,10 +6466,35 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         directly_handled_by_seniors_count = seniors_directly_handled_count
         proactive_agent_messages_count = seniors_proactive_count
         other_bots_to_seniors_count = seniors_other_bots_count
-    
+
+    # Delighters specific: calculate chats that went from GPT_MV_DELIGHTERS to Resolvers
+    if department_name == 'Delighters':
+        (
+            delighters_to_seniors_count,
+            delighters_to_resolvers_normal_count,
+            delighters_tech_error_in_path_count,
+            delighters_normal_to_seniors_count,
+            delighters_normal_to_callers_count,
+        ) = calculate_delighters_to_resolvers_breakdown(
+            session, department_name, departments_config, target_date
+        )
+        delighters_unique_union_count = calculate_total_chats_reached_mv_delighters(
+            session, department_name, departments_config, target_date
+        )
+
+        # Map Delighters values onto the existing MV-style variables so they flow into
+        # the master metrics row under the same column names.
+        total_seniors_callers_count = delighters_to_seniors_count
+        seniors_no_response_transfers_count = delighters_tech_error_in_path_count
+        seniors_our_bot_to_mv_resolvers_seniors_count = delighters_normal_to_seniors_count
+        seniors_our_bot_to_mv_callers_count = delighters_normal_to_callers_count
+        # seniors_our_bot_count is the denominator for the destination-skill percentages.
+        # For Delighters that's the "normal" (non-tech-error) sub total = seniors + callers.
+        seniors_our_bot_count = delighters_to_resolvers_normal_count
+
     # if department_name == 'MV_Resolvers':
     #     print(f"    ⚠️  MV_Resolvers proactive agent metrics: DISABLED")
-    
+
     # Calculate guardrail interventions for departments that support it
     if department_name in ['MV_Resolvers', 'CC_Resolvers', 'multiple_contract_detector']:
         total_guardrail_count = calculate_total_guardrail(
@@ -6414,6 +6593,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'our_bot_to_pre_r_visa_retention_percentage': 0.0,
             'delighters_to_seniors_count': delighters_to_seniors_count,
             'delighters_to_seniors_percentage': 0.0,
+            'delighters_to_resolvers_normal_count': delighters_to_resolvers_normal_count,
             'total_seniors_callers_count': total_seniors_callers_count,
             'total_seniors_callers_percentage': 0.0,
             'seniors_our_bot_count': seniors_our_bot_count,
@@ -6794,6 +6974,10 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         unique_union_count = len(
             bot_handled_conv_ids.union(seniors_conv_ids).union(seniors_supervisor_excluded_conv_ids)
         )
+    elif department_name == 'Delighters':
+        # For Delighters, UNIQUE_UNION_COUNT stores the count of chats where
+        # the GPT_MV_DELIGHTERS bot actually sent at least one message.
+        unique_union_count = delighters_unique_union_count
     
     # Calculate percentage for MV_Resolvers total seniors/callers (out of unique union count)
     total_seniors_callers_percentage = (total_seniors_callers_count / unique_union_count * 100) if unique_union_count > 0 else (total_seniors_callers_count / total_conversations * 100) if total_conversations > 0 else 0
@@ -6966,6 +7150,7 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'our_bot_to_pre_r_visa_retention_percentage': our_bot_to_pre_r_visa_retention_percentage,
         'delighters_to_seniors_count': delighters_to_seniors_count,
         'delighters_to_seniors_percentage': delighters_to_seniors_percentage,
+        'delighters_to_resolvers_normal_count': delighters_to_resolvers_normal_count,
         'total_seniors_callers_count': total_seniors_callers_count,
         'total_seniors_callers_percentage': total_seniors_callers_percentage,
         'seniors_no_response_transfers_count': seniors_no_response_transfers_count,
@@ -8847,6 +9032,7 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'OUR_BOT_TO_PRE_R_VISA_RETENTION_PERCENTAGE': 'FLOAT',
                 'DELIGHTERS_TO_SENIORS_COUNT': 'NUMBER',
                 'DELIGHTERS_TO_SENIORS_PERCENTAGE': 'FLOAT',
+                'DELIGHTERS_TO_RESOLVERS_NORMAL_COUNT': 'NUMBER',
                 'TOTAL_SENIORS_CALLERS_COUNT': 'NUMBER',
                 'TOTAL_SENIORS_CALLERS_PERCENTAGE': 'FLOAT',
                 'SENIORS_NO_RESPONSE_TRANSFERS_COUNT': 'NUMBER',
@@ -9016,6 +9202,8 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'ZERO_BOT_TECHNICAL_ISSUE_PERCENTAGE':                    'FLOAT',
                 'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_COUNT':                  'NUMBER',
                 'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_PERCENTAGE':             'FLOAT',
+                # MV Delighters — breakdown of transfers to Resolvers
+                'DELIGHTERS_TO_RESOLVERS_NORMAL_COUNT':                   'NUMBER',
             }
             for df_col, col_type in new_col_type_map.items():
                 if df_col.upper() not in table_columns_upper and df_col in new_metrics_df.columns:
@@ -12241,6 +12429,7 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'OUR_BOT_TO_PRE_R_VISA_RETENTION_PERCENTAGE': round(bot_data.get('our_bot_to_pre_r_visa_retention_percentage', 0), 2),
             'DELIGHTERS_TO_SENIORS_COUNT': bot_data.get('delighters_to_seniors_count', 0),
             'DELIGHTERS_TO_SENIORS_PERCENTAGE': round(bot_data.get('delighters_to_seniors_percentage', 0), 2),
+            'DELIGHTERS_TO_RESOLVERS_NORMAL_COUNT': bot_data.get('delighters_to_resolvers_normal_count', 0),
             'TOTAL_SENIORS_CALLERS_COUNT': bot_data.get('total_seniors_callers_count', 0),
             'TOTAL_SENIORS_CALLERS_PERCENTAGE': round(bot_data.get('total_seniors_callers_percentage', 0), 2),
             'SENIORS_NO_RESPONSE_TRANSFERS_COUNT': bot_data.get('seniors_no_response_transfers_count', 0),
