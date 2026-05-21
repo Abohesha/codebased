@@ -2690,7 +2690,7 @@ def calculate_total_chats_reached_mv_delighters(session, department_name, depart
     """
     try:
         department_config = departments_config[department_name]
-        table_name = 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS'
+        table_name = 'SILVER.CHAT_EVALS.Delighters_CHATS'
         filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
 
         print(f"    🎯 Calculating total chats that reached MV Delighters bot for {department_name}...")
@@ -2698,7 +2698,7 @@ def calculate_total_chats_reached_mv_delighters(session, department_name, depart
         query = f"""
         SELECT COUNT(DISTINCT conversation_id) AS total_reached
         FROM {table_name}
-        WHERE target_skill_per_message = 'GPT_MV_DELIGHTERS'
+        WHERE target_skill_per_message in ('GPT_MV_DELIGHTERS')
         AND date(updated_at) = '{filter_date}'
         """
 
@@ -2738,7 +2738,7 @@ def calculate_delighters_to_resolvers_breakdown(session, department_name, depart
         department_config = departments_config[department_name]
         agent_skills = department_config['agent_skills']  # ['MV_RESOLVERS_SENIORS', 'MV_CALLERS']
         bot_skills = department_config.get('bot_skills', ['GPT_MV_DELIGHTERS'])
-        table_name = 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS'
+        table_name = department_config.get('table_name', 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS')
 
         # Build a SQL OR clause + an upper-case Python set of bot skills to look for.
         bot_skills_upper = [s.upper() for s in bot_skills]
@@ -3283,16 +3283,18 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
     Returns:
         int: Number of records inserted
     """
-    # Only applies to MV_Resolvers
-    if department_name != 'MV_Resolvers':
+    # Only applies to MV_Resolvers and Delighters
+    if department_name not in ('MV_Resolvers', 'Delighters'):
         return 0
     
     try:
         department_config = departments_config[department_name]
         table_name = department_config.get('table_name', 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS')
-        breakdown_table = 'SILVER.CHAT_EVALS.RESOLVERS_CHATS_BREAKDOWN'
-        # LLM_EVAL.PUBLIC.RESOLVERS_CHATS_BREAKDOWN_TEST
-        # SILVER.CHAT_EVALS.RESOLVERS_CHATS_BREAKDOWN
+        # Use department-specific breakdown table
+        if department_name == 'Delighters':
+            breakdown_table = 'SILVER.CHAT_EVALS.MV_DELIGHTERS_CHATS_BREAKDOWN'
+        else:
+            breakdown_table = 'SILVER.CHAT_EVALS.RESOLVERS_CHATS_BREAKDOWN'
         filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
         agent_skills = department_config['agent_skills']
         mv_resolvers_bot_skills = department_config.get('bot_skills', [])
@@ -3300,19 +3302,33 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
         print(f"    📊 Storing resolvers chats breakdown for {department_name}...")
         
         # SQL query to find ALL conversations that reached seniors or callers (THE BASE)
-        # EXCLUDE delighters conversations from the base
-        query_base = f"""
-        SELECT DISTINCT conversation_id 
-        FROM {table_name}
-        WHERE (target_skill_per_message ILIKE '%MV_RESOLVERS_SENIORS%' 
-               OR through_skill ILIKE '%MV_RESOLVERS_SENIORS%'
-               OR target_skill_per_message ILIKE '%MV_CALLERS%'
-               OR through_skill ILIKE '%MV_CALLERS%'
-               OR target_skill_per_message ILIKE '%Pre_R_Visa_Retention%'
-               OR through_skill ILIKE '%Pre_R_Visa_Retention%')
-        AND through_skill NOT ILIKE '%DELIGHTERS%'
-        AND date(end_date) = '{target_date}'
-        """
+        # For MV_Resolvers: exclude delighters. For Delighters: must have DELIGHTERS in through_skill.
+        if department_name == 'Delighters':
+            query_base = f"""
+            SELECT DISTINCT conversation_id 
+            FROM {table_name}
+            WHERE (target_skill_per_message ILIKE '%MV_RESOLVERS_SENIORS%' 
+                   OR through_skill ILIKE '%MV_RESOLVERS_SENIORS%'
+                   OR target_skill_per_message ILIKE '%MV_CALLERS%'
+                   OR through_skill ILIKE '%MV_CALLERS%'
+                   OR target_skill_per_message ILIKE '%Pre_R_Visa_Retention%'
+                   OR through_skill ILIKE '%Pre_R_Visa_Retention%')
+            AND through_skill ILIKE '%DELIGHTERS%'
+            AND date(end_date) = '{target_date}'
+            """
+        else:
+            query_base = f"""
+            SELECT DISTINCT conversation_id 
+            FROM {table_name}
+            WHERE (target_skill_per_message ILIKE '%MV_RESOLVERS_SENIORS%' 
+                   OR through_skill ILIKE '%MV_RESOLVERS_SENIORS%'
+                   OR target_skill_per_message ILIKE '%MV_CALLERS%'
+                   OR through_skill ILIKE '%MV_CALLERS%'
+                   OR target_skill_per_message ILIKE '%Pre_R_Visa_Retention%'
+                   OR through_skill ILIKE '%Pre_R_Visa_Retention%')
+            AND through_skill NOT ILIKE '%DELIGHTERS%'
+            AND date(end_date) = '{target_date}'
+            """
         
         result_df_base = session.sql(query_base).to_pandas()
         
@@ -6468,7 +6484,11 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         other_bots_to_seniors_count = seniors_other_bots_count
 
     # Delighters specific: calculate chats that went from GPT_MV_DELIGHTERS to Resolvers
+    # and store raw breakdown into MV_DELIGHTERS_CHATS_BREAKDOWN
     if department_name == 'Delighters':
+        store_resolvers_chats_breakdown(
+            session, department_name, departments_config, target_date
+        )
         (
             delighters_to_seniors_count,
             delighters_to_resolvers_normal_count,
