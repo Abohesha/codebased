@@ -627,13 +627,13 @@ def get_snowflake_departments_config():
             'bot_filter': 'bot'            
 
         },
-        # 'Doctors': {
-        #     'bot_skills': ['GPT_Doctors'],
-        #     'agent_skills': ['Doctor'],
-        #     'table_name': 'SILVER.CHAT_EVALS.DOCTORS_CHATS',  # Update with actual table name
-        #     'skill_filter': 'gpt_doctors',
-        #     'bot_filter': 'bot'
-        # },
+        # # 'Doctors': {
+        # #     'bot_skills': ['GPT_Doctors'],
+        # #     'agent_skills': ['Doctor'],
+        # #     'table_name': 'SILVER.CHAT_EVALS.DOCTORS_CHATS',  # Update with actual table name
+        # #     'skill_filter': 'gpt_doctors',
+        # #     'bot_filter': 'bot'
+        # # },
         'AT_Filipina': {
             'bot_skills': [
                'Filipina_in_PHl_Pending_Valid_Visa','Filipina_in_PHl_Pending_valid_visa','Filipina_Outside_Pending_Facephoto',
@@ -3138,20 +3138,18 @@ def calculate_total_seniors_callers(session, department_name, departments_config
                     proactive_mv_resolvers_seniors_only_count += 1
         
         # ========================================
-        # BUSINESS REQUIREMENT: Adjust proactive and total to only include MV_RESOLVERS_SENIORS for proactive
-        # Other categories (directly_handled, our_bot, other_bots) still use all 3 skills
+        # BUSINESS REQUIREMENT: Proactive reported separately, excluded from totals entirely
+        # - proactive_count is adjusted to MV_RESOLVERS_SENIORS only (for the metric)
+        # - ALL proactive conv_ids are removed from base_conv_ids so that:
+        #     1. TOTAL_SENIORS_CALLERS_COUNT excludes proactive
+        #     2. unique_union_count (seniors_conv_ids = base_conv_ids) also excludes proactive
+        # - Other categories (directly_handled, our_bot, other_bots, no_response_transfers) are unaffected
         # ========================================
-        proactive_other_skills_count = proactive_count - proactive_mv_resolvers_seniors_only_count
+        proactive_count = proactive_mv_resolvers_seniors_only_count
         
-        # Replace proactive_count with MV_RESOLVERS_SENIORS only
-        proactive_count_adjusted = proactive_mv_resolvers_seniors_only_count
-        
-        # Adjust total_seniors_callers to exclude proactive conversations with other skills
-        total_seniors_callers_count_adjusted = total_seniors_callers_count - proactive_other_skills_count
-        
-        # Use adjusted values from here forward
-        proactive_count = proactive_count_adjusted
-        total_seniors_callers_count = total_seniors_callers_count_adjusted
+        # Remove ALL proactive conv_ids from base so total and unique_union_count exclude them
+        base_conv_ids -= proactive_conv_ids
+        total_seniors_callers_count = len(base_conv_ids)
         
         # ========================================
         # Calculate breakdown by TARGET AGENT SKILL for "Our bot to seniors"
@@ -3215,10 +3213,9 @@ def calculate_total_seniors_callers(session, department_name, departments_config
         print(f"          └─ To Pre_R_Visa_Retention: {seniors_our_bot_to_pre_r_visa_retention_count}/{our_bot_count}")
         print(f"          └─ Sum check: {seniors_our_bot_to_mv_resolvers_seniors_count + seniors_our_bot_to_mv_callers_count + seniors_our_bot_to_pre_r_visa_retention_count} = {our_bot_count}")
         print(f"       └─ Directly handled by seniors: {directly_handled_count}")
-        print(f"       └─ Proactive (MV_RESOLVERS_SENIORS only - ADJUSTED): {proactive_count}")
-        print(f"          └─ Excluded {proactive_other_skills_count} proactive conversations with MV_CALLERS/Pre_R_Visa_Retention")
+        print(f"       └─ Proactive (MV_RESOLVERS_SENIORS only, excluded from total): {proactive_count}")
         print(f"       └─ Other bots to seniors: {other_bots_count}")
-        print(f"       └─ ADJUSTED Total check: {our_bot_count + directly_handled_count + proactive_count + other_bots_count} = {total_seniors_callers_count} (proactive adjusted to MV_RESOLVERS_SENIORS only)")
+        print(f"       └─ Total check (excl. proactive): {our_bot_count + directly_handled_count + other_bots_count + no_response_transfers_count} = {total_seniors_callers_count}")
         
         return total_seniors_callers_count, our_bot_count, directly_handled_count, proactive_count, proactive_mv_resolvers_seniors_only_count, delighters_count, other_bots_count, base_conv_ids, our_bot_conv_ids, seniors_our_bot_to_mv_resolvers_seniors_count, seniors_our_bot_to_mv_callers_count, seniors_our_bot_to_pre_r_visa_retention_count, supervisor_excluded_conv_ids, no_response_transfers_count
         
@@ -3665,32 +3662,13 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
             return 0
         
         # ========================================
-        # BUSINESS REQUIREMENT: Filter out proactive conversations that are NOT MV_RESOLVERS_SENIORS
-        # These should not be counted as "reached resolvers"
+        # BUSINESS REQUIREMENT: Remove ALL proactive conversations from the raw breakdown table.
+        # Proactive is reported as a separate metric and excluded from totals entirely.
         # ========================================
-        proactive_to_exclude = []
-        for record in breakdown_records:
-            if record['CATEGORY'] == 'proactive':
-                conv_id = record['CONVERSATION_ID']
-                conv_rows = result_df_full[result_df_full['CONVERSATION_ID'] == conv_id]
-                
-                # Check if this proactive conversation reached MV_RESOLVERS_SENIORS
-                has_mv_resolvers_seniors = False
-                for _, row in conv_rows.iterrows():
-                    target_skill = str(row.get('TARGET_SKILL_PER_MESSAGE', '')).strip().upper()
-                    through_skill = str(row.get('THROUGH_SKILL', '')).strip().upper()
-                    if 'MV_RESOLVERS_SENIORS' in target_skill or 'MV_RESOLVERS_SENIORS' in through_skill:
-                        has_mv_resolvers_seniors = True
-                        break
-                
-                # If it only reached MV_CALLERS or Pre_R_Visa_Retention, exclude it
-                if not has_mv_resolvers_seniors:
-                    proactive_to_exclude.append(conv_id)
-        
-        # Filter out the excluded proactive conversations
-        if proactive_to_exclude:
-            breakdown_df = breakdown_df[~breakdown_df['CONVERSATION_ID'].isin(proactive_to_exclude)]
-            print(f"    🚫 Excluded {len(proactive_to_exclude)} proactive conversations (MV_CALLERS/Pre_R_Visa_Retention only)")
+        proactive_count_in_breakdown = len([r for r in breakdown_records if r['CATEGORY'] == 'proactive'])
+        breakdown_df = breakdown_df[breakdown_df['CATEGORY'] != 'proactive']
+        if proactive_count_in_breakdown > 0:
+            print(f"    🚫 Excluded {proactive_count_in_breakdown} proactive conversations from breakdown table (reported separately)")
         
         if breakdown_df.empty:
             print(f"    ✅ No records remaining after filtering")
