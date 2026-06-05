@@ -590,7 +590,7 @@ def get_snowflake_departments_config():
         'MV_Resolvers': {
             'bot_skills': ['GPT_MV_RESOLVERS'],
             'agent_skills': ['MV_RESOLVERS_SENIORS', 'MV_CALLERS', 'MV_RESOLVERS_MANAGER', 
-                           'GPT_MV_RESOLVERS_SHADOWERS', 'GPT_MV_RESOLVERS_SHADOWERS_MANAGER','Pre_R_Visa_Retention'],
+                           'GPT_MV_RESOLVERS_SHADOWERS', 'GPT_MV_RESOLVERS_SHADOWERS_MANAGER','Pre_R_Visa_Retention','MV_CALLERS_QUEUE','GPT_MV_RESOLVERS_QUEUE','GPT_MV_CALLERS_QUEUE'],
             'table_name': 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS',  # Update with actual table name
             'skill_filter': 'gpt_mv_resolvers',
             'bot_filter': 'bot'
@@ -945,6 +945,11 @@ def get_mv_bot_boomerang_conv_ids(session, conversation_ids, target_date):
         'Pre_R_Visa_Retention',
         'GPT_RESOLVERS_BOT',
         'gpt_delighters',
+        'MV_CALLERS_QUEUE',
+        'GPT_MV_RESOLVERS_QUEUE',
+        'GPT_MV_CALLERS_QUEUE',
+        'MV_Resolvers_Seniors',
+        'MV_Callers'
     ]
     mv_internal_skills_str = "', '".join(mv_internal_skills)
 
@@ -985,7 +990,7 @@ def get_mv_bot_boomerang_conv_ids(session, conversation_ids, target_date):
     JOIN transfers t
       ON t.conversation_id = o.conversation_id
      AND t.transfer_time > o.out_time
-     AND t.target_skill_name IN ('MV_RESOLVERS_SENIORS', 'MV_CALLERS')
+     AND t.target_skill_name IN ('MV_RESOLVERS_SENIORS', 'MV_CALLERS','MV_Resolvers_Seniors','MV_Callers')
     """
 
     try:
@@ -1070,8 +1075,8 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
         raise ValueError(f"Department '{department_name}' not configured")
     
     dept_config = departments_config[department_name]
-    agent_skills = dept_config['agent_skills']
-    bot_skills = dept_config['bot_skills']
+    agent_skills = [s.upper() for s in dept_config['agent_skills']]
+    bot_skills = [s.upper() for s in dept_config['bot_skills']]
 
     # Normalize certain message types based on TEXT payload (private/transfer -> tool/tool response)
     df = df.copy()
@@ -1139,7 +1144,7 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     agent_normal_messages = df[
         (df['MESSAGE_TYPE'].str.lower() == 'normal message') &
         (df['SENT_BY'].str.lower() == 'agent') &
-        (df['TARGET_SKILL_PER_MESSAGE'].isin(agent_skills))
+        (df['TARGET_SKILL_PER_MESSAGE'].str.upper().isin(agent_skills))
     ]
     conversations_with_agents = set(agent_normal_messages['CONVERSATION_ID'].unique())
     print(f"    👨‍💼 Conversations with department agent messages: {len(conversations_with_agents)}")
@@ -1155,7 +1160,7 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     bot_normal_messages = df[
         (df['MESSAGE_TYPE'].str.lower() == 'normal message') &
         (df['SENT_BY'].str.lower() == 'bot') &
-        (df['TARGET_SKILL_PER_MESSAGE'].isin(bot_skills))
+        (df['TARGET_SKILL_PER_MESSAGE'].str.upper().isin(bot_skills))
     ]
     conversations_with_bots = set(bot_normal_messages['CONVERSATION_ID'].unique())
     print(f"    🤖 Conversations with department bot messages: {len(conversations_with_bots)}")
@@ -1179,7 +1184,7 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     # Extra: Conversations with inferred tool/tool response messages (from private/transfer)
     tool_like_messages = df[
         (df['MESSAGE_TYPE'].str.lower().isin(['tool', 'tool response'])) &
-        (df['TARGET_SKILL_PER_MESSAGE'].isin(bot_skills))
+        (df['TARGET_SKILL_PER_MESSAGE'].str.upper().isin(bot_skills))
     ]
     conversations_with_tools = set(tool_like_messages['CONVERSATION_ID'].unique())
     print(f"    🧰 Conversations with tool/tool response messages: {len(conversations_with_tools)}")
@@ -1247,7 +1252,7 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
         guardrail_conv_ids = get_guardrail_conversation_ids(session, department_name, target_date)
         print(f"    🛡️  Found {len(guardrail_conv_ids)} conversations with guardrail interactions (will be kept as exceptions)")
         
-        # Combine bot_skills and agent_skills to get all department skills
+        # Combine bot_skills and agent_skills to get all department skills (already uppercased)
         department_skills = set(bot_skills + agent_skills)
         
         # Check if EXECUTION_ID column exists
@@ -1256,7 +1261,7 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
                 # Get all messages for this conversation that are from department skills
                 conv_messages = df[
                     (df['CONVERSATION_ID'] == conv_id) &
-                    (df['TARGET_SKILL_PER_MESSAGE'].isin(department_skills))
+                    (df['TARGET_SKILL_PER_MESSAGE'].str.upper().isin(department_skills))
                 ]
                 
                 # If there are department messages
@@ -1302,10 +1307,10 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
             first_row = df[df['CONVERSATION_ID'] == conv_id].iloc[0]
             through_skill = str(first_row.get('THROUGH_SKILL', ''))
             
-            # Parse THROUGH_SKILL as comma-separated values for exact matching
-            through_skills_list = [s.strip() for s in through_skill.split(',')]
+            # Parse THROUGH_SKILL as comma-separated values for exact matching (uppercased for case-insensitive check)
+            through_skills_list = [s.strip().upper() for s in through_skill.split(',')]
             
-            # Check if any bot_skill is contained in THROUGH_SKILL (exact match)
+            # Check if any bot_skill is contained in THROUGH_SKILL (exact match, both already uppercased)
             matching_bot_skills = [bot_skill for bot_skill in bot_skills if bot_skill in through_skills_list]
             
             # Exclude if the only matching bot skill is GPT_MAIDSAT
@@ -1976,6 +1981,12 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     - This logic ONLY applies to CC_Resolvers department
     - All other departments use standard counting logic
     
+    SPECIAL LOGIC FOR MV_RESOLVERS DEPARTMENT:
+    - Messages with TARGET_SKILL_PER_MESSAGE in {"GPT_MV_RESOLVERS_QUEUE", "GPT_MV_CALLERS_QUEUE"}
+      and SENT_BY = "BOT" are treated as agent interventions
+    - These skills represent actual agent interventions despite SENT_BY being "BOT"
+    - These messages are counted as agent messages and excluded from bot message counts
+    
     Args:
         conversation_df: DataFrame containing one conversation's messages
         department_name: Department name for skill filtering
@@ -1998,25 +2009,51 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
                - has_complaint_action: True if system message contains "Open_or_CommentOn_Complaint" (CC_Resolvers only)
     """
     department_config = departments_config[department_name]
-    # Include BOTH bot_skills and agent_skills for the department
-    department_all_skills = set(department_config['bot_skills'] + department_config['agent_skills'])
-    # Extract agent_skills separately for specific counting
-    agent_dept_skills = set(department_config['agent_skills'])
+    # Include BOTH bot_skills and agent_skills for the department (uppercased for case-insensitive matching)
+    department_all_skills = set(s.upper() for s in department_config['bot_skills'] + department_config['agent_skills'])
+    # Extract agent_skills separately for specific counting (uppercased for case-insensitive matching)
+    agent_dept_skills = set(s.upper() for s in department_config['agent_skills'])
     
     # Get exclusion list for this department
     exclusion_list = AGENT_INTERVENTION_EXCLUSIONS.get(department_name, [])
     
     # Filter for normal messages from agents (using Snowflake column names)
-    agent_normal_messages = conversation_df[
-        (conversation_df['SENT_BY'].str.upper() == 'AGENT') & 
-        (conversation_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE')
-    ]
+    # SPECIAL CASE FOR MV_RESOLVERS: Also include GPT_MV_RESOLVERS_QUEUE with SENT_BY='BOT'
+    # as these are actually agent interventions
+    # Skills that appear as SENT_BY='BOT' but represent actual agent interventions for MV_Resolvers
+    MV_RESOLVERS_AGENT_QUEUE_SKILLS = {'GPT_MV_RESOLVERS_QUEUE', 'GPT_MV_CALLERS_QUEUE'}
+
+    if department_name == 'MV_Resolvers':
+        agent_normal_messages = conversation_df[
+            (
+                ((conversation_df['SENT_BY'].str.upper() == 'AGENT') & 
+                 (conversation_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE'))
+                |
+                ((conversation_df['SENT_BY'].str.upper() == 'BOT') & 
+                 (conversation_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE') &
+                 (conversation_df['TARGET_SKILL_PER_MESSAGE'].str.upper().isin(MV_RESOLVERS_AGENT_QUEUE_SKILLS)))
+            )
+        ]
+    else:
+        agent_normal_messages = conversation_df[
+            (conversation_df['SENT_BY'].str.upper() == 'AGENT') & 
+            (conversation_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE')
+        ]
     
     # Filter for normal messages from bots
-    bot_normal_messages = conversation_df[
-        (conversation_df['SENT_BY'].str.upper() == 'BOT') & 
-        (conversation_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE')
-    ]
+    # SPECIAL CASE FOR MV_RESOLVERS: Exclude queue skills from bot messages
+    # since those are actually agent interventions (handled above in agent_normal_messages)
+    if department_name == 'MV_Resolvers':
+        bot_normal_messages = conversation_df[
+            (conversation_df['SENT_BY'].str.upper() == 'BOT') & 
+            (conversation_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE') &
+            (~conversation_df['TARGET_SKILL_PER_MESSAGE'].str.upper().isin(MV_RESOLVERS_AGENT_QUEUE_SKILLS))
+        ]
+    else:
+        bot_normal_messages = conversation_df[
+            (conversation_df['SENT_BY'].str.upper() == 'BOT') & 
+            (conversation_df['MESSAGE_TYPE'].str.upper() == 'NORMAL MESSAGE')
+        ]
     
     # Filter for private messages from system (for call request detection)
     system_private_messages = conversation_df[
@@ -2059,7 +2096,7 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     
     # Iterate through agent messages and apply CC_Resolvers-specific logic
     for idx, message in agent_normal_messages.iterrows():
-        message_skill = message['TARGET_SKILL_PER_MESSAGE']
+        message_skill = str(message['TARGET_SKILL_PER_MESSAGE']).upper()
         if message_skill in department_all_skills:
             # CC_Resolvers specific logic: Skip counting if current skill is "GPT CC Shadowers"
             # and the first different previous skill was "GPT_CC_PROSPECT"
@@ -2128,7 +2165,7 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     # Count agent messages under agent dept skills only
     agent_normal_messages_under_agent_dept_skills = 0
     for idx, message in agent_normal_messages.iterrows():
-        message_skill = message['TARGET_SKILL_PER_MESSAGE']
+        message_skill = str(message['TARGET_SKILL_PER_MESSAGE']).upper()
         if message_skill in department_all_skills:
             # Apply same CC_Resolvers logic here
             should_skip_counting = False
@@ -2148,7 +2185,7 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
     
     # Check for valid system transfers from bot skills to agent skills (not initiated by GPT)
     has_valid_system_transfer = False
-    bot_skills = set(department_config['bot_skills'])
+    bot_skills = set(s.upper() for s in department_config['bot_skills'])
     
     # Filter for system messages with type 'private' or 'transfer'
     system_transfer_messages = conversation_df[
@@ -2169,8 +2206,8 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
         # 3. 'to_skill' is in agent_skills
         if (transfer_data.get('by', '') and 
             'gpt' not in transfer_data.get('by', '').lower() and
-            transfer_data.get('from_skill', '') in bot_skills and
-            transfer_data.get('to_skill', '') in agent_dept_skills):
+            transfer_data.get('from_skill', '').upper() in bot_skills and
+            transfer_data.get('to_skill', '').upper() in agent_dept_skills):
             
             has_valid_system_transfer = True
             break  # Found one valid transfer, no need to continue
@@ -2184,15 +2221,15 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
             transfer_data = parse_transfer(message_text)
             if (transfer_data.get('by', '') and
                     'gpt' not in transfer_data.get('by', '').lower() and
-                    transfer_data.get('from_skill', '') in bot_skills and
+                    transfer_data.get('from_skill', '').upper() in bot_skills and
                     transfer_data.get('to_skill', '') and
-                    transfer_data.get('to_skill', '') not in bot_skills):
+                    transfer_data.get('to_skill', '').upper() not in bot_skills):
                 has_valid_system_transfer = True
                 break
     # Count bot messages from department-related skills
     bot_message_count = 0
     for _, message in bot_normal_messages.iterrows():
-        message_skill = message['TARGET_SKILL_PER_MESSAGE']
+        message_skill = str(message['TARGET_SKILL_PER_MESSAGE']).upper()
         if message_skill in department_all_skills:
             bot_message_count += 1
     
