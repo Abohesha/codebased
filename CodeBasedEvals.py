@@ -580,13 +580,13 @@ def get_snowflake_departments_config():
     Maps department names to their bot_skills, agent_skills, and Snowflake table names.
     """
     return {
-        # 'CC_Resolvers': {
-        #     'bot_skills': ['GPT_CC_RESOLVERS'],
-        #     'agent_skills': ['CC_RESOLVERS_AGENTS', 'GPT CC Shadowers','GPT_CC_RESOLVERS_SHADOWERS'],
-        #     'table_name': 'SILVER.CHAT_EVALS.CC_CLIENT_CHATS',  # Update with actual table name
-        #     'skill_filter': 'gpt_cc_resolvers',  # For compatibility with existing logic
-        #     'bot_filter': 'bot'
-        # },
+        'CC_Resolvers': {
+            'bot_skills': ['GPT_CC_RESOLVERS'],
+            'agent_skills': ['CC_RESOLVERS_AGENTS', 'GPT CC Shadowers','GPT_CC_RESOLVERS_SHADOWERS'],
+            'table_name': 'SILVER.CHAT_EVALS.CC_CLIENT_CHATS',  # Update with actual table name
+            'skill_filter': 'gpt_cc_resolvers',  # For compatibility with existing logic
+            'bot_filter': 'bot'
+        },
         'MV_Resolvers': {
             'bot_skills': ['GPT_MV_RESOLVERS'],
             'agent_skills': ['MV_RESOLVERS_SENIORS', 'MV_CALLERS', 'MV_RESOLVERS_MANAGER', 
@@ -652,11 +652,21 @@ def get_snowflake_departments_config():
             'skill_filter': 'filipina_outside',
             'bot_filter': 'bot'
         },
+        # AT bot_skills: also used for CC SQL pool/transfers/repetition/unresponsive (edit here only).
         'AT_Filipina_In_PHL': {
             'bot_skills': [
-                'Filipina_in_PHl_Pending_Valid_Visa','Filipina_in_PHl_Pending_valid_visa', 'Filipina_in_PHl_Pending_Passport', 'Filipina_in_PHl_Pending_Facephoto',
-                'Filipina_in_PHl_Pending_OEC_From_Company', 'Filipina_in_PHl_Pending_OEC_From_maid', 'Filipina_in_PHl_Pending_Ticket',
-                'Filipina_in_PHl_Ticket_Booked'
+                'Filipina_in_PHl_Pending_Facephoto',
+                'Filipina_in_PHl_Pending_OEC_From_Company',
+                'Filipina_in_PHl_Pending_OEC_From_Maid',
+                'Filipina_in_PHl_Pending_Passport',
+                'Filipina_in_PHl_Pending_Ticket',
+                'Filipina_in_PHl_Pending_Valid_Visa',
+                'Filipina_in_PHl_Ticket_Booked',
+                'filipina_lawp_applicant',
+                'filipina_male_applicant',
+                'filipina_marilyn_applicant',
+                'Filipina_Rejected',
+                'GPT_MAIDSAT_FILIPINA_PHILIPPINES Skill',
             ],
             'agent_skills': [
                 'NUDGERS_REPETITIVE', 'GPT_FILIPINA_SHADOWERS', 'Nudger_TaxiBooking',
@@ -668,14 +678,22 @@ def get_snowflake_departments_config():
         },
         'AT_Filipina_Outside_UAE': {
             'bot_skills': [
+                'Filipina_Outside_Pending_Facephoto',
+                'Filipina_Outside_Pending_Passport',
+                'Filipina_Outside_Pending_Ticket',
+                'Filipina_Outside_Ticket_Booked',
                 'Filipina_Outside_UAE_Pending_Joining_Date',
-                'Filipina_Outside_Upcoming_Joining', 'Filipina_Outside_Pending_Passport', 'Filipina_Outside_Pending_Ticket',
-                'Filipina_Outside_Ticket_Booked','Filipina_Outside_Pending_Facephoto', 'Filipina_Outside_UAE_Vacation'
+                'Filipina_Outside_Cancel_Requested',
+                'Filipina_Outside_Not_Interested',
+                'Filipina_Outside_UAE_Rejected',
+                'Filipina_Outside_UAE_Vacation',
+                'Filipina_Outside_Upcoming_Joining',
             ],
             'agent_skills': [
                 'NUDGERS_REPETITIVE', 'GPT_FILIPINA_SHADOWERS', 'Nudger_TaxiBooking',
                 'Nudgers_agents', 'AIRPORT_HUSTLER', 'OUTSIDE_FILIPINA_SHADOWERS'
             ],
+            'cc_agent_init': 'FILIPINA_SHADOWERS',
             'table_name': 'SILVER.CHAT_EVALS.APPLICANTS_CHATS',  # Shared table
             'skill_filter': 'filipina_in_phl',
             'bot_filter': 'bot'
@@ -694,13 +712,27 @@ def get_snowflake_departments_config():
         },
         'AT_African': {
             'bot_skills': [
-                'MAIDSAT_AFRICAN_GPT', 'GPT_MAIDSAT_AFRICAN_KENYA', 
-                'GPT_MAIDSAT_AFRICAN_OUTSIDE', 'GPT_MAIDSAT_AFRICAN_UAE', 'Kenyan Assesment','Kenyan Client Scenario','Kenyan Profile Picture Collection','Kenyan WP Approved','Kenyan Passport Collection'
+                'Kenyan Assessment',
+                'Kenyan Attestation',
+                'Kenyan Attested Pending WP',
+                'Kenyan Client Scenario',
+                'Kenyan Failed Applicants',
+                'Kenyan GCC Collection',
+                'Kenyan Interview',
+                'Kenyan LAWP Maids',
+                'Kenyan MFA Collection',
+                'Kenyan Passport Collection',
+                'Kenyan Profile Picture Collection',
+                'Kenyan Visa Issued',
+                'Kenyan WP Approved',
             ],
             'agent_skills': [
                 'AFRICAN_NUDGER', 'Kenyan_Attestation_Hustling', 'Kenyan_PreAttestation',
                 'Nudgers_Repetitive_Kenyan', 'AFRICAN_NUDGER'
             ],
+            'cc_agents': 'Kenyan Shadower',
+            'cc_uae': 'GPT_MAIDSAT_AFRICAN_UAE',
+            'cc_agent_init': 'Kenyan Shadower',
             'table_name': 'SILVER.CHAT_EVALS.APPLICANTS_CHATS',  # Shared table
             'skill_filter': 'maidsat_africa',
             'bot_filter': 'bot'
@@ -1046,6 +1078,15 @@ def track_removed_conversations(session, conversation_ids, department_name, targ
     return removal_records
 
 
+# Applicant Tracking departments aligned with reference CC validation SQL.
+_AT_DEPARTMENTS = frozenset({
+    'AT_Filipina', 'AT_Filipina_In_PHL', 'AT_Filipina_Outside_UAE',
+    'AT_Filipina_Inside_UAE', 'AT_African', 'Gulf_maids',
+})
+
+_AT_UNRESPONSIVE_SQL_CACHE = {}
+
+
 def filter_conversations_snowflake_engagement(session, df, department_name, departments_config, target_date=None, apply_filter_5=True):
     """
     Apply engagement filtering for Snowflake data.
@@ -1073,7 +1114,44 @@ def filter_conversations_snowflake_engagement(session, df, department_name, depa
     
     if department_name not in departments_config:
         raise ValueError(f"Department '{department_name}' not configured")
-    
+
+    # AT departments use APPLICANTS_CHATS with different engagement logic —
+    # skip engagement quality filters (1-4) but keep Filter 5 (THROUGH_SKILL skill
+    # partitioning) so each AT department only processes its own conversations.
+    if department_name in _AT_DEPARTMENTS:
+        print(f"  ⏭️  Skipping engagement filters 1-4 for AT department: {department_name}")
+        all_conv_ids = set(df['CONVERSATION_ID'].unique())
+
+        # Authoritative pool: CC supposed_bot (skill ILIKE + target-day msg + consumer in msg_window).
+        cc_supposed_bot_ids = get_at_cc_supposed_bot_conv_ids(
+            session, department_name, departments_config, target_date
+        )
+        in_data = cc_supposed_bot_ids & all_conv_ids
+        missing_from_data = cc_supposed_bot_ids - all_conv_ids
+        filtered_df_at = df[df['CONVERSATION_ID'].isin(cc_supposed_bot_ids)] if cc_supposed_bot_ids else df.iloc[0:0]
+        print(f"  🎯 AT CC supposed_bot pool: {len(cc_supposed_bot_ids)} convs ({len(in_data)} in data, {len(missing_from_data)} missing from load)")
+        conversations_with_bot_skills_at = cc_supposed_bot_ids
+        conv_with_consumer_at = cc_supposed_bot_ids
+
+        filtering_stats = {
+            'total_original_conversations': len(all_conv_ids),
+            'conversations_with_consumer': len(conv_with_consumer_at),
+            'conversations_with_agents': len(all_conv_ids),
+            'conversations_with_bots': len(all_conv_ids),
+            'conversations_with_tools': len(all_conv_ids),
+            'conversations_with_service': len(all_conv_ids),
+            'conversations_with_all_null_execution_id': 0,
+            'engagement_valid_conversations': len(all_conv_ids),
+            'conversations_with_bot_skills': len(conversations_with_bot_skills_at),
+            'bot_routed_no_response_conversations': 0,
+            'engagement_retention_rate': 100.0,
+            'bot_skill_retention_rate': round(len(conversations_with_bot_skills_at) / len(all_conv_ids) * 100, 1) if all_conv_ids else 0,
+            'hi_bye_conversations_removed': 0,
+            'conversations_filtered_by_date': 0,
+            'consumer_only_chats_count': 0,
+        }
+        return filtered_df_at, filtering_stats, set(), []
+
     dept_config = departments_config[department_name]
     agent_skills = [s.upper() for s in dept_config['agent_skills']]
     bot_skills = [s.upper() for s in dept_config['bot_skills']]
@@ -1758,6 +1836,455 @@ def clear_department_cache():
     print("🗑️  Department data cache cleared")
 
 
+def _at_escape_sql_str(value):
+    return str(value).replace("'", "''")
+
+
+def _at_normalize_target_date(target_date):
+    if target_date is None:
+        return datetime.now().strftime('%Y-%m-%d')
+    if isinstance(target_date, str):
+        return datetime.strptime(target_date, '%Y-%m-%d').strftime('%Y-%m-%d')
+    return target_date.strftime('%Y-%m-%d')
+
+
+def _at_skills_values_sql(bot_skills):
+    return " UNION ALL ".join(
+        f"SELECT '{_at_escape_sql_str(s)}' AS skill_name" for s in bot_skills
+    )
+
+
+def _at_dept_reference(department_name, departments_config):
+    """CC transfer target names — optional cc_agents / cc_uae / cc_agent_init on dept config."""
+    cfg = departments_config.get(department_name, {})
+    agents = cfg.get('cc_agents', 'FILIPINA_SHADOWERS')
+    return {
+        'disqualifying_targets': (agents, 'AIRPORT_HUSTLER'),
+        'transfer_agents_target': agents,
+        'transfer_inside_uae_target': cfg.get('cc_uae', 'GPT_MAIDSAT_FILIPINA_UAE'),
+        'agent_initiated_shadower_pattern': cfg.get('cc_agent_init'),
+    }
+
+
+# AT_Filipina_In_PHL uses the same agent-initiated SQL as Outside_UAE (identical count).
+_AT_AGENT_INITIATED_REFERENCE_DEPT = 'AT_Filipina_Outside_UAE'
+
+
+def _at_agent_initiated_source_department(department_name, departments_config):
+    """Which department config to use for agent-initiated chat SQL."""
+    if department_name == 'AT_Filipina_In_PHL':
+        return _AT_AGENT_INITIATED_REFERENCE_DEPT
+    if _at_dept_reference(department_name, departments_config).get('agent_initiated_shadower_pattern'):
+        return department_name
+    return None
+
+
+def _at_sql_in_list(values):
+    return ', '.join(f"'{_at_escape_sql_str(v)}'" for v in values)
+
+
+def _at_matched_convs_cte(use_exists=True):
+    if use_exists:
+        return """matched_convs AS (
+      SELECT DISTINCT c.conversation_id
+      FROM BA_VIEWS.CHATCC_SILVER.CC_CONVERSATIONS c
+      WHERE EXISTS (
+        SELECT 1 FROM skills s
+        WHERE c.joined_skills ILIKE '%' || s.skill_name || '%'
+      )
+    )"""
+    return """matched_convs AS (
+      SELECT DISTINCT c.conversation_id
+      FROM BA_VIEWS.CHATCC_SILVER.CC_CONVERSATIONS c
+      JOIN skills s ON c.joined_skills ILIKE '%' || s.skill_name || '%'
+    )"""
+
+
+def _at_cc_supposed_bot_ctes_sql(target_date, bot_skills, use_exists=True, include_text=False):
+    """Reference SQL CTEs through supposed_bot (skills → matched_convs → msg_window → pool)."""
+    td = _at_normalize_target_date(target_date)
+    text_col = ', m.TEXT' if include_text else ''
+    return f"""
+    WITH skills AS (
+      {_at_skills_values_sql(bot_skills)}
+    ),
+    {_at_matched_convs_cte(use_exists)},
+    msg_window AS (
+      SELECT m.conversation_id, m.message_time, m.sent_by{text_col}
+      FROM BA_VIEWS.CHATCC_SILVER.CC_MESSAGES m
+      WHERE m.message_time >= DATE_TRUNC('DAY', DATEADD(day, -1, '{td}'::DATE))
+        AND m.message_time <  DATEADD(day, 1, DATE_TRUNC('DAY', '{td}'::DATE))
+    ),
+    convs_with_target_day_msg AS (
+      SELECT DISTINCT conversation_id
+      FROM msg_window
+      WHERE TO_DATE(message_time) = '{td}'
+    ),
+    convs_with_consumer_msg AS (
+      SELECT DISTINCT conversation_id
+      FROM msg_window
+      WHERE UPPER(TRIM(sent_by)) = 'CONSUMER'
+    ),
+    supposed_bot AS (
+      SELECT DISTINCT mc.conversation_id
+      FROM matched_convs mc
+      JOIN convs_with_target_day_msg td ON td.conversation_id = mc.conversation_id
+      JOIN convs_with_consumer_msg cu ON cu.conversation_id = mc.conversation_id
+    )"""
+
+
+def _at_cc_sql_bot_skills(department_name, departments_config):
+    """Skills for CC_CONVERSATIONS ILIKE matching — from departments_config bot_skills."""
+    return departments_config.get(department_name, {}).get('bot_skills', [])
+
+
+def _at_filter_df_to_msg_window(conversation_df, target_date):
+    """Keep only messages in CC msg_window [target_day-1, target_day+1)."""
+    td = _at_normalize_target_date(target_date)
+    target_day = datetime.strptime(td, '%Y-%m-%d')
+    window_start = target_day - timedelta(days=1)
+    window_end = target_day + timedelta(days=1)
+    work_df = conversation_df.copy()
+    ts = pd.to_datetime(work_df['MESSAGE_SENT_TIME'], errors='coerce')
+    mask = (ts >= window_start) & (ts < window_end)
+    return work_df[mask]
+
+
+def get_at_sql_handling_metrics(session, department_name, departments_config, target_date):
+    """
+    Reference SQL bot_flag / agent_counts / handled_by_bot / fully_handled_by_bot aggregates.
+    """
+    bot_skills = _at_cc_sql_bot_skills(department_name, departments_config)
+    if not bot_skills:
+        return {}
+
+    prefix = _at_cc_supposed_bot_ctes_sql(target_date, bot_skills, use_exists=True)
+    dq_in = _at_sql_in_list(_at_dept_reference(department_name, departments_config)['disqualifying_targets'])
+    query = prefix + f""",
+    bot_flag AS (
+      SELECT
+        s.conversation_id,
+        MAX(IFF(UPPER(TRIM(mw.sent_by)) = 'BOT', 1, 0)) AS has_bot
+      FROM supposed_bot s
+      LEFT JOIN msg_window mw ON mw.conversation_id = s.conversation_id
+      GROUP BY 1
+    ),
+    agent_counts AS (
+      SELECT
+        s.conversation_id,
+        SUM(IFF(UPPER(TRIM(mw.sent_by)) = 'AGENT', 1, 0)) AS agent_msg_count
+      FROM supposed_bot s
+      LEFT JOIN msg_window mw ON mw.conversation_id = s.conversation_id
+      GROUP BY 1
+    ),
+    chats_with_transfers AS (
+      SELECT DISTINCT t.CONVERSATION_ID AS conversation_id, t.TARGET_SKILL_NAME AS target_skill_name
+      FROM supposed_bot s
+      JOIN BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS t ON t.CONVERSATION_ID = s.conversation_id
+      WHERE t.INTERACTION_TYPE = 'TRANSFER_CONVERSATION'
+        AND EXISTS (SELECT 1 FROM skills ss WHERE ss.skill_name = t.SOURCE_SKILL_NAME)
+        AND NOT EXISTS (SELECT 1 FROM skills ts WHERE ts.skill_name = t.TARGET_SKILL_NAME)
+    ),
+    disqualifying_transfers AS (
+      SELECT DISTINCT conversation_id
+      FROM chats_with_transfers
+      WHERE target_skill_name IN ({dq_in})
+    ),
+    handled_by_bot AS (
+      SELECT conversation_id FROM bot_flag WHERE has_bot = 1
+    ),
+    fully_handled_by_bot AS (
+      SELECT h.conversation_id
+      FROM handled_by_bot h
+      LEFT JOIN agent_counts ac ON ac.conversation_id = h.conversation_id
+      LEFT JOIN disqualifying_transfers dt ON dt.conversation_id = h.conversation_id
+      WHERE COALESCE(ac.agent_msg_count, 0) = 0
+        AND dt.conversation_id IS NULL
+    )
+    SELECT
+      (SELECT COUNT(DISTINCT conversation_id) FROM supposed_bot) AS SUPPOSED_CNT,
+      (SELECT COUNT(DISTINCT conversation_id) FROM handled_by_bot) AS HANDLED_CNT,
+      (SELECT COUNT(DISTINCT conversation_id) FROM fully_handled_by_bot) AS FULLY_BOT_CNT,
+      (SELECT COUNT(*) FROM agent_counts WHERE agent_msg_count >= 1) AS AGENT_1P_CNT,
+      (SELECT COUNT(*) FROM agent_counts WHERE agent_msg_count >= 2) AS AGENT_2P_CNT,
+      (SELECT COUNT(*) FROM agent_counts WHERE agent_msg_count >= 3) AS AGENT_3P_CNT
+    """
+    df = session.sql(query).to_pandas()
+    if df.empty:
+        return {}
+    row = df.iloc[0]
+    return {
+        'supposed_cnt': int(row['SUPPOSED_CNT']),
+        'handled_cnt': int(row['HANDLED_CNT']),
+        'fully_bot_cnt': int(row['FULLY_BOT_CNT']),
+        'agent_1p_cnt': int(row['AGENT_1P_CNT']),
+        'agent_2p_cnt': int(row['AGENT_2P_CNT']),
+        'agent_3p_cnt': int(row['AGENT_3P_CNT']),
+    }
+
+
+def _at_empty_transfer_metrics():
+    return {
+        'at_transfers_total_count': 0,
+        'at_transfer_to_agents_count': 0,
+        'at_transfer_to_hustlers_count': 0,
+        'at_transfer_to_no_av_count': 0,
+        'at_transfer_to_inside_uae_count': 0,
+        'at_transfer_to_outside_uae_count': 0,
+        'at_transfer_to_in_phl_bot_count': 0,
+        'at_agent_initiated_shared_outside_uae_count': 0,
+    }
+
+
+def _at_transferred_conversation_count(bot_data, department_name):
+    if department_name in _AT_DEPARTMENTS:
+        return bot_data.get('at_transfers_total_count', 0)
+    return bot_data.get('transferred_conversation_count', 0)
+
+
+def _at_transfer_pct(count, total_conversations):
+    return round((count / total_conversations * 100), 2) if total_conversations > 0 else 0.0
+
+
+def _at_master_transfer_table_columns(department_name, bot_data):
+    """Map AT CC-SQL transfer metrics to EVALS_SUMMARY master table columns."""
+    zero = {
+        'AT_TRANSFER_TO_AGENTS_COUNT': 0,
+        'AT_TRANSFER_TO_AGENTS_PERCENTAGE': 0.0,
+        'AT_TRANSFER_TO_HUSTLERS_COUNT': 0,
+        'AT_TRANSFER_TO_HUSTLERS_PERCENTAGE': 0.0,
+        'AT_TRANSFER_TO_NO_AV_COUNT': 0,
+        'AT_TRANSFER_TO_NO_AV_PERCENTAGE': 0.0,
+        'AT_TRANSFER_TO_INSIDE_UAE_COUNT': 0,
+        'AT_TRANSFER_TO_INSIDE_UAE_PERCENTAGE': 0.0,
+        'AT_TRANSFER_TO_OUTSIDE_UAE_COUNT': 0,
+        'AT_TRANSFER_TO_OUTSIDE_UAE_PERCENTAGE': 0.0,
+        'AT_TRANSFER_TO_IN_PHL_BOT_COUNT': 0,
+        'AT_TRANSFER_TO_IN_PHL_BOT_PERCENTAGE': 0.0,
+        'AT_AGENT_INITIATED_SHARED_OUTSIDE_UAE_COUNT': 0,
+        'AT_AGENT_INITIATED_SHARED_OUTSIDE_UAE_PERCENTAGE': 0.0,
+    }
+    if department_name not in _AT_DEPARTMENTS:
+        return zero
+
+    total_conversations = bot_data.get('total_conversations', 0)
+    agents_count = bot_data.get('at_transfer_to_agents_count', 0)
+    hustlers_count = bot_data.get('at_transfer_to_hustlers_count', 0)
+    no_av_count = bot_data.get('at_transfer_to_no_av_count', 0)
+    inside_uae_count = bot_data.get('at_transfer_to_inside_uae_count', 0)
+    outside_uae_count = bot_data.get('at_transfer_to_outside_uae_count', 0)
+    in_phl_bot_count = bot_data.get('at_transfer_to_in_phl_bot_count', 0)
+    agent_init_shared_count = bot_data.get('at_agent_initiated_shared_outside_uae_count', 0)
+
+    return {
+        'AT_TRANSFER_TO_AGENTS_COUNT': agents_count,
+        'AT_TRANSFER_TO_AGENTS_PERCENTAGE': _at_transfer_pct(agents_count, total_conversations),
+        'AT_TRANSFER_TO_HUSTLERS_COUNT': hustlers_count,
+        'AT_TRANSFER_TO_HUSTLERS_PERCENTAGE': _at_transfer_pct(hustlers_count, total_conversations),
+        'AT_TRANSFER_TO_NO_AV_COUNT': no_av_count,
+        'AT_TRANSFER_TO_NO_AV_PERCENTAGE': _at_transfer_pct(no_av_count, total_conversations),
+        'AT_TRANSFER_TO_INSIDE_UAE_COUNT': inside_uae_count,
+        'AT_TRANSFER_TO_INSIDE_UAE_PERCENTAGE': _at_transfer_pct(inside_uae_count, total_conversations),
+        'AT_TRANSFER_TO_OUTSIDE_UAE_COUNT': outside_uae_count,
+        'AT_TRANSFER_TO_OUTSIDE_UAE_PERCENTAGE': _at_transfer_pct(outside_uae_count, total_conversations),
+        'AT_TRANSFER_TO_IN_PHL_BOT_COUNT': in_phl_bot_count,
+        'AT_TRANSFER_TO_IN_PHL_BOT_PERCENTAGE': _at_transfer_pct(in_phl_bot_count, total_conversations),
+        'AT_AGENT_INITIATED_SHARED_OUTSIDE_UAE_COUNT': agent_init_shared_count,
+        'AT_AGENT_INITIATED_SHARED_OUTSIDE_UAE_PERCENTAGE': _at_transfer_pct(
+            agent_init_shared_count, total_conversations
+        ),
+    }
+
+
+def _at_compute_transfer_metrics(transfer_pairs_df, department_name, departments_config):
+    """Bucket CC transfer rows per department reference SQL rules (distinct conv per bucket)."""
+    dept_ref = _at_dept_reference(department_name, departments_config)
+    phl_targets = set(departments_config.get('AT_Filipina_In_PHL', {}).get('bot_skills', []))
+    buckets = {
+        'agents': set(),
+        'hustlers': set(),
+        'no_av': set(),
+        'inside_uae': set(),
+        'outside_uae': set(),
+        'in_phl_bot': set(),
+    }
+    all_transfer_convs = set()
+
+    if transfer_pairs_df is None or transfer_pairs_df.empty:
+        return _at_empty_transfer_metrics()
+
+    for _, row in transfer_pairs_df.iterrows():
+        conv_id = row['CONVERSATION_ID']
+        target = str(row.get('TARGET_SKILL_NAME', '') or '')
+        all_transfer_convs.add(conv_id)
+
+        if target == dept_ref['transfer_agents_target']:
+            buckets['agents'].add(conv_id)
+        elif target == 'AIRPORT_HUSTLER':
+            buckets['hustlers'].add(conv_id)
+        elif target == dept_ref['transfer_inside_uae_target']:
+            buckets['inside_uae'].add(conv_id)
+        elif department_name == 'AT_Filipina_In_PHL':
+            if target == 'Filipina_in_PHl_NO_AV' or 'NO_AV' in target.upper():
+                buckets['no_av'].add(conv_id)
+            elif 'OUTSIDE_UAE' in target.upper():
+                buckets['outside_uae'].add(conv_id)
+        elif department_name == 'AT_Filipina_Outside_UAE' and target in phl_targets:
+            buckets['in_phl_bot'].add(conv_id)
+
+    return {
+        'at_transfers_total_count': len(all_transfer_convs),
+        'at_transfer_to_agents_count': len(buckets['agents']),
+        'at_transfer_to_hustlers_count': len(buckets['hustlers']),
+        'at_transfer_to_no_av_count': len(buckets['no_av']),
+        'at_transfer_to_inside_uae_count': len(buckets['inside_uae']),
+        'at_transfer_to_outside_uae_count': len(buckets['outside_uae']),
+        'at_transfer_to_in_phl_bot_count': len(buckets['in_phl_bot']),
+        'at_agent_initiated_shared_outside_uae_count': 0,
+    }
+
+
+def _at_cc_agent_initiated_chats_ctes_sql(target_date, bot_skills, shadower_ilike_pattern):
+    """Reference SQL CTEs through agent_initiated_chats (shadower skill, first msg AGENT, no bot skill)."""
+    td = _at_normalize_target_date(target_date)
+    shadower = _at_escape_sql_str(shadower_ilike_pattern)
+    return f"""
+    WITH params AS (
+      SELECT '{td}'::DATE AS target_day
+    ),
+    skills AS (
+      {_at_skills_values_sql(bot_skills)}
+    ),
+    msg_window AS (
+      SELECT m.conversation_id, m.message_time
+      FROM BA_VIEWS.CHATCC_SILVER.CC_MESSAGES m
+      CROSS JOIN params p
+      WHERE m.message_time >= DATE_TRUNC('DAY', DATEADD(day, -1, p.target_day))
+        AND m.message_time <  DATEADD(day, 1, DATE_TRUNC('DAY', p.target_day))
+    ),
+    convs_with_target_day_msg AS (
+      SELECT DISTINCT mw.conversation_id
+      FROM msg_window mw
+      CROSS JOIN params p
+      WHERE TO_DATE(mw.message_time) = p.target_day
+    ),
+    first_msg_sender AS (
+      SELECT
+        m.conversation_id,
+        UPPER(TRIM(m.sent_by)) AS sent_by,
+        ROW_NUMBER() OVER (PARTITION BY m.conversation_id ORDER BY m.message_time) AS rn
+      FROM BA_VIEWS.CHATCC_SILVER.CC_MESSAGES m
+    ),
+    agent_initiated_chats AS (
+      SELECT DISTINCT c.conversation_id
+      FROM BA_VIEWS.CHATCC_SILVER.CC_CONVERSATIONS c
+      JOIN convs_with_target_day_msg td ON td.conversation_id = c.conversation_id
+      JOIN first_msg_sender f
+        ON f.conversation_id = c.conversation_id
+       AND f.rn = 1
+       AND f.sent_by = 'AGENT'
+      WHERE c.joined_skills ILIKE '%{shadower}%'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM skills s
+          WHERE c.joined_skills ILIKE '%' || s.skill_name || '%'
+        )
+    )"""
+
+
+def get_at_sql_agent_initiated_chats_conv_ids(session, department_name, departments_config, target_date):
+    """Conversation IDs for agent_initiated_chats (reference SQL)."""
+    shadower_pattern = _at_dept_reference(department_name, departments_config).get('agent_initiated_shadower_pattern')
+    if not shadower_pattern:
+        return set()
+
+    bot_skills = _at_cc_sql_bot_skills(department_name, departments_config)
+    if not bot_skills:
+        return set()
+
+    query = _at_cc_agent_initiated_chats_ctes_sql(target_date, bot_skills, shadower_pattern) + """
+    SELECT conversation_id AS CONVERSATION_ID FROM agent_initiated_chats
+    WHERE conversation_id IS NOT NULL
+    """
+    df = session.sql(query).to_pandas()
+    if df.empty:
+        return set()
+    return {
+        str(cid) for cid in df['CONVERSATION_ID'].dropna().unique()
+        if cid is not None and str(cid).strip()
+    }
+
+
+def get_at_sql_agent_initiated_shared_outside_uae_conv_ids(session, department_name, departments_config, target_date):
+    """Backward-compatible alias for agent-initiated chat conv IDs."""
+    return get_at_sql_agent_initiated_chats_conv_ids(
+        session, department_name, departments_config, target_date
+    )
+
+
+def get_at_sql_agent_initiated_shared_outside_uae_count(session, department_name, departments_config, target_date):
+    """
+    Agent-initiated chats (reference SQL agent_initiated_chats CTE).
+    Shadower skill only, target-day activity, first message from AGENT, no bot skill match.
+    """
+    return len(get_at_sql_agent_initiated_chats_conv_ids(
+        session, department_name, departments_config, target_date
+    ))
+
+
+def get_at_cc_supposed_bot_conv_ids(session, department_name, departments_config, target_date):
+    """
+    Authoritative AT conversation pool from reference SQL logic:
+    CC_CONVERSATIONS skill ILIKE + target-day message + consumer message in msg_window.
+    """
+    bot_skills = _at_cc_sql_bot_skills(department_name, departments_config)
+    if not bot_skills:
+        return set()
+
+    query = _at_cc_supposed_bot_ctes_sql(target_date, bot_skills, use_exists=True) + """
+    SELECT conversation_id AS CONVERSATION_ID FROM supposed_bot
+    """
+    df = session.sql(query).to_pandas()
+    return set(df['CONVERSATION_ID'].unique()) if not df.empty else set()
+
+
+def load_at_cc_supplement_df(session, department_name, departments_config, target_date, existing_conv_ids):
+    """
+    Load CC_MESSAGES msg_window rows for supposed_bot conversations missing from APPLICANTS_CHATS.
+    Returns a DataFrame shaped like APPLICANTS_CHATS for concat into the phase-1 load.
+    """
+    bot_skills = _at_cc_sql_bot_skills(department_name, departments_config)
+    if not bot_skills:
+        return pd.DataFrame()
+
+    supplement_query = _at_cc_supposed_bot_ctes_sql(target_date, bot_skills, use_exists=True, include_text=True) + """,
+    matched_skill_map AS (
+      SELECT c.conversation_id, MIN(s.skill_name) AS matched_skill
+      FROM BA_VIEWS.CHATCC_SILVER.CC_CONVERSATIONS c
+      JOIN skills s ON c.joined_skills ILIKE '%' || s.skill_name || '%'
+      WHERE c.conversation_id IN (SELECT conversation_id FROM supposed_bot)
+      GROUP BY c.conversation_id
+    )
+    SELECT
+      m.conversation_id                                                          AS CONVERSATION_ID,
+      m.sent_by                                                                  AS SENT_BY,
+      m.message_time                                                             AS MESSAGE_SENT_TIME,
+      m.message_time                                                             AS UPDATED_AT,
+      MIN(m.message_time) OVER (PARTITION BY m.conversation_id)                 AS START_DATE,
+      m.TEXT                                                                     AS TEXT,
+      ms.matched_skill                                                           AS THROUGH_SKILL,
+      'Normal Message'                                                           AS MESSAGE_TYPE,
+      NULL                                                                       AS TARGET_SKILL_PER_MESSAGE
+    FROM supposed_bot s
+    JOIN matched_skill_map ms ON ms.conversation_id = s.conversation_id
+    JOIN msg_window m ON m.conversation_id = s.conversation_id
+    """
+    supp_df = session.sql(supplement_query).to_pandas()
+    if supp_df.empty:
+        return supp_df
+    return supp_df[~supp_df['CONVERSATION_ID'].isin(existing_conv_ids)]
+
+
 def process_department_phase1(session: snowpark.Session, department_name, target_date=None, apply_filter_5=True):
     """
     Process a single department through Phase 1 foundation layer WITH CACHING.
@@ -1838,7 +2365,30 @@ def process_department_phase1(session: snowpark.Session, department_name, target
         if raw_data_df.empty:
             print(f"    ⚠️  No data found in {table_name}")
             return pd.DataFrame(), {'error': 'No data found'}, False, set()
-        
+
+        # AT departments: supplement APPLICANTS_CHATS with missing conversations from CC_CONVERSATIONS/CC_MESSAGES.
+        # CC_CONVERSATIONS uses fuzzy ILIKE skill matching so it catches conversations that APPLICANTS_CHATS misses
+        # (e.g. conversations not linked to an applicant record, or skills not indexed in APPLICANTS_CHATS).
+        if department_name in _AT_DEPARTMENTS:
+            try:
+                departments_config_supp = get_snowflake_departments_config()
+                existing_ids = set(raw_data_df['CONVERSATION_ID'].unique())
+                supp_df = load_at_cc_supplement_df(
+                    session, department_name, departments_config_supp, target_date, existing_ids
+                )
+                if not supp_df.empty:
+                    for col in raw_data_df.columns:
+                        if col not in supp_df.columns:
+                            supp_df[col] = None
+                    supp_df = supp_df[raw_data_df.columns]
+                    raw_data_df = pd.concat([raw_data_df, supp_df], ignore_index=True)
+                    new_convs = supp_df['CONVERSATION_ID'].nunique()
+                    print(f"    ➕ AT supplement: added {new_convs} conversations ({len(supp_df)} rows) from CC not in APPLICANTS_CHATS")
+                else:
+                    print(f"    ℹ️  AT supplement: no new conversations found in CC for {department_name}")
+            except Exception as supp_err:
+                print(f"    ⚠️  AT supplement query failed (continuing with APPLICANTS_CHATS only): {str(supp_err)}")
+
         # Step 2: Apply preprocessing
         print(f"🧹 Step 2: Preprocessing data...")
         processed_df = preprocess_data_snowflake_phase1(raw_data_df, department_name, target_date)
@@ -1963,7 +2513,7 @@ def get_first_different_previous_skill(current_idx, current_skill, df):
     return None
 
 
-def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_name, departments_config):
+def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_name, departments_config, disqualifying_transfer_conv_ids=None, target_date=None):
     """
     Check if a conversation is fully handled by bot (Snowflake version).
     Adapted from main_analytics.py is_conversation_fully_handled_by_bot()
@@ -2009,6 +2559,27 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
                - has_complaint_action: True if system message contains "Open_or_CommentOn_Complaint" (CC_Resolvers only)
     """
     department_config = departments_config[department_name]
+
+    # AT departments: align with reference SQL (BOT/AGENT counts in CC msg_window only)
+    if department_name in _AT_DEPARTMENTS:
+        at_df = conversation_df
+        if target_date is not None:
+            at_df = _at_filter_df_to_msg_window(conversation_df, target_date)
+        sent_by_norm = at_df['SENT_BY'].astype(str).str.strip().str.upper()
+        agent_message_count = int((sent_by_norm == 'AGENT').sum())
+        has_bot = bool((sent_by_norm == 'BOT').any())
+        bot_message_count = int((sent_by_norm == 'BOT').sum())
+        conv_id = conversation_df['CONVERSATION_ID'].iloc[0]
+        has_disqualifying_transfer = conv_id in (disqualifying_transfer_conv_ids or set())
+        # SQL handled_by_bot: has at least one bot message
+        is_bot_handled = has_bot
+        # SQL fully_handled_by_bot: has bot, 0 agent messages, no transfer to agents/hustlers
+        is_bot_handled_excluding_fillers = has_bot and agent_message_count == 0 and not has_disqualifying_transfer
+        return (
+            is_bot_handled, agent_message_count, False, agent_message_count, bot_message_count,
+            is_bot_handled_excluding_fillers, False, agent_message_count, 0, False
+        )
+
     # Include BOTH bot_skills and agent_skills for the department (uppercased for case-insensitive matching)
     department_all_skills = set(s.upper() for s in department_config['bot_skills'] + department_config['agent_skills'])
     # Extract agent_skills separately for specific counting (uppercased for case-insensitive matching)
@@ -2242,9 +2813,7 @@ def is_conversation_fully_handled_by_bot_snowflake(conversation_df, department_n
         pass
     
     # Return tuple: (is_bot_handled, agent_message_count, has_call_request, counted_agent_messages, bot_message_count, is_bot_handled_excluding_fillers, has_valid_system_transfer, agent_message_count_excluding_pokes, agent_messages_from_allowed_skills, has_complaint_action)
-    # For CC_Resolvers: 
-    #   - bot must have sent at least 1 normal message (bot_message_count > 0) to be considered handled
-    #   - Open Complaint + 0 agent messages = HANDLED (business requirement)
+    # CC_Resolvers: bot must have sent at least 1 normal message (bot_message_count > 0) to be considered handled.
     # For other departments: only check agent_message_count == 0
     if department_name == 'CC_Resolvers':
         is_bot_handled = (agent_message_count == 0) and (bot_message_count > 0)
@@ -6604,6 +7173,48 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             'zero_bot_uncategorized_count': 0,
             # Per-chat detail rows for ZERO_BOT_DETAILS_TABLE (CC_Resolvers only)
             'zero_bot_category_rows': [],
+            # CC_Resolvers "Not Fully Handled" 6-category breakdown
+            'nfh_tech_issue_autotransfer_count': 0,
+            'nfh_tech_issue_autotransfer_percentage': 0.0,
+            'nfh_bot_delay_autotransfer_count': 0,
+            'nfh_bot_delay_autotransfer_percentage': 0.0,
+            'nfh_bot_call_customer_count': 0,
+            'nfh_bot_call_customer_percentage': 0.0,
+            'nfh_bot_call_customer_standard_case_count': 0,
+            'nfh_bot_call_customer_standard_case_percentage': 0.0,
+            'nfh_bot_call_customer_cancellation_case_count': 0,
+            'nfh_bot_call_customer_cancellation_case_percentage': 0.0,
+            'nfh_bot_call_customer_client_threatening_case_count': 0,
+            'nfh_bot_call_customer_client_threatening_case_percentage': 0.0,
+            'nfh_bot_call_customer_other_count': 0,
+            'nfh_bot_call_customer_other_percentage': 0.0,
+            'nfh_bot_transfer_cc_resolvers_count': 0,
+            'nfh_bot_transfer_cc_resolvers_percentage': 0.0,
+            'nfh_bot_transfer_second_request_to_speak_to_human_count': 0,
+            'nfh_bot_transfer_second_request_to_speak_to_human_percentage': 0.0,
+            'nfh_bot_transfer_refund_followup_count': 0,
+            'nfh_bot_transfer_refund_followup_percentage': 0.0,
+            'nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_count': 0,
+            'nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_percentage': 0.0,
+            'nfh_bot_transfer_maid_manager_visit_handling_count': 0,
+            'nfh_bot_transfer_maid_manager_visit_handling_percentage': 0.0,
+            'nfh_bot_transfer_replacement_nationality_mismatch_count': 0,
+            'nfh_bot_transfer_replacement_nationality_mismatch_percentage': 0.0,
+            'nfh_bot_transfer_contract_modification_count': 0,
+            'nfh_bot_transfer_contract_modification_percentage': 0.0,
+            'nfh_bot_transfer_unofficial_maid_vacation_request_count': 0,
+            'nfh_bot_transfer_unofficial_maid_vacation_request_percentage': 0.0,
+            'nfh_bot_transfer_client_escalations_count': 0,
+            'nfh_bot_transfer_client_escalations_percentage': 0.0,
+            'nfh_bot_transfer_payment_or_billing_reasons_count': 0,
+            'nfh_bot_transfer_payment_or_billing_reasons_percentage': 0.0,
+            'nfh_bot_transfer_other_count': 0,
+            'nfh_bot_transfer_other_percentage': 0.0,
+            'nfh_review_complaint_intervention_count': 0,
+            'nfh_review_complaint_intervention_percentage': 0.0,
+            'nfh_manual_agent_intervention_count': 0,
+            'nfh_manual_agent_intervention_percentage': 0.0,
+            'nfh_category_rows': [],
             'proactive_agent_messages_count': proactive_agent_messages_count,
             'proactive_agent_messages_percentage': 0.0,
             'directly_handled_by_seniors_count': directly_handled_by_seniors_count,
@@ -6743,7 +7354,16 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     # table (one tuple per 0-bot-msg chat: conversation_id, target_date,
     # department, category). Persisted to ZERO_BOT_DETAILS_TABLE downstream.
     zero_bot_category_rows = []
-    
+
+    # CC_Resolvers "Not Fully Handled" 6-category breakdown.
+    # Applies to chats where bot_message_count > 0 but agents still intervened.
+    nfh_category_counts = {cat: 0 for cat in NFH_CATEGORIES}
+    nfh_subcategory_counts = {
+        'bot_call_customer': {sub: 0 for sub in NFH_CALL_CUSTOMER_SUBCATEGORIES},
+        'bot_transfer_cc_resolvers': {sub: 0 for sub in NFH_TRANSFER_CC_RESOLVERS_SUBCATEGORIES},
+    }
+    nfh_category_rows = []   # per-chat detail rows for EVALS_NFH_DETAILS
+
     # Initialize CC_Resolvers specific: Track handle ratio when bot responds
     # (Exclude conversations with 0 bot messages from both numerator and denominator)
     bot_handled_with_bot_response_count = 0
@@ -6752,9 +7372,40 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     # Initialize intervention conversations data collection
     intervention_conversations_data = []
     chats_with_n_plus_agent_messages_data = []
+
+    # AT: pre-load conversations with disqualifying transfers (dept-specific shadower / hustler)
+    disqualifying_transfer_conv_ids = set()
+    is_at_department = department_name in _AT_DEPARTMENTS
+    if is_at_department:
+        try:
+            cc_bot_skills_dq = _at_cc_sql_bot_skills(department_name, departments_config)
+            dq_targets = _at_sql_in_list(_at_dept_reference(department_name, departments_config)['disqualifying_targets'])
+            if cc_bot_skills_dq:
+                dq_query = _at_cc_supposed_bot_ctes_sql(target_date, cc_bot_skills_dq, use_exists=True) + f""",
+                chats_with_transfers AS (
+                  SELECT DISTINCT t.conversation_id, t.target_skill_name
+                  FROM supposed_bot s
+                  JOIN BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS t ON t.conversation_id = s.conversation_id
+                  WHERE t.INTERACTION_TYPE = 'TRANSFER_CONVERSATION'
+                    AND EXISTS (SELECT 1 FROM skills ss WHERE ss.skill_name = t.SOURCE_SKILL_NAME)
+                    AND NOT EXISTS (SELECT 1 FROM skills ts WHERE ts.skill_name = t.TARGET_SKILL_NAME)
+                )
+                SELECT DISTINCT conversation_id AS CONVERSATION_ID
+                FROM chats_with_transfers
+                WHERE TARGET_SKILL_NAME IN ({dq_targets})
+                """
+                dq_df = session.sql(dq_query).to_pandas()
+                disqualifying_transfer_conv_ids = set(dq_df['CONVERSATION_ID'].unique())
+                print(f"    🚫 AT disqualifying transfers: {len(disqualifying_transfer_conv_ids)} conversations")
+        except Exception as dq_err:
+            print(f"    ⚠️  AT disqualifying transfer lookup failed: {str(dq_err)}")
     
     for conv_id, conv_df in conversations:
-        is_bot_handled, agent_message_count, has_call_request, counted_agent_messages, bot_message_count, is_bot_handled_excluding_fillers, has_valid_system_transfer, agent_message_count_excluding_pokes, agent_messages_from_allowed_skills, has_complaint_action = is_conversation_fully_handled_by_bot_snowflake(conv_df, department_name, departments_config)
+        is_bot_handled, agent_message_count, has_call_request, counted_agent_messages, bot_message_count, is_bot_handled_excluding_fillers, has_valid_system_transfer, agent_message_count_excluding_pokes, agent_messages_from_allowed_skills, has_complaint_action = is_conversation_fully_handled_by_bot_snowflake(
+            conv_df, department_name, departments_config,
+            disqualifying_transfer_conv_ids=disqualifying_transfer_conv_ids,
+            target_date=target_date,
+        )
         
         # CC_Resolvers specific: Track conversations with NO bot normal messages from GPT_CC_RESOLVERS
         if department_name == 'CC_Resolvers':
@@ -6807,6 +7458,16 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         # Track new metric: bot handled excluding fillers
         if is_bot_handled_excluding_fillers:
             bot_handled_excluding_fillers_count += 1
+
+        # AT departments: agent breakdown applies to ALL conversations (SQL counts agents across full supposed_bot pool)
+        if is_at_department:
+            if agent_message_count >= 1:
+                chats_with_1_plus_agent_messages += 1
+                chats_with_1_plus_agent_messages_excluding_pokes += 1
+            if agent_message_count >= 2:
+                chats_with_2_plus_agent_messages += 1
+            if agent_message_count >= 3:
+                chats_with_3_plus_agent_messages += 1
         
         if is_bot_handled:
             bot_handled_count += 1
@@ -6828,11 +7489,13 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         else:
             # Count conversations with agent messages (not bot-handled cases)
             # For CC_Resolvers: only count if bot sent at least 1 message (bot_message_count > 0)
-            # For other departments: count all
-            
-            should_count_in_breakdown = True
-            if department_name == 'CC_Resolvers' and bot_message_count == 0:
+            # AT departments: counted above for all conversations (not gated on is_bot_handled)
+            if is_at_department:
                 should_count_in_breakdown = False
+            else:
+                should_count_in_breakdown = True
+                if department_name == 'CC_Resolvers' and bot_message_count == 0:
+                    should_count_in_breakdown = False
             
             if should_count_in_breakdown:
                 # For CC_Resolvers: also count complaint actions as 1+ agent messages
@@ -6845,6 +7508,21 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
                             'ANALYSIS_DATE': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         })
                     chats_with_1_plus_agent_messages += 1
+                    # CC_Resolvers "Not Fully Handled" 6-category classification.
+                    if department_name == 'CC_Resolvers':
+                        nfh_cat, nfh_sub = classify_cc_resolvers_not_fully_handled_chat(conv_df)
+                        nfh_category_counts[nfh_cat] = nfh_category_counts.get(nfh_cat, 0) + 1
+                        if nfh_sub and nfh_cat in nfh_subcategory_counts:
+                            nfh_subcategory_counts[nfh_cat][nfh_sub] = (
+                                nfh_subcategory_counts[nfh_cat].get(nfh_sub, 0) + 1
+                            )
+                        nfh_category_rows.append({
+                            'CONVERSATION_ID': conv_id,
+                            'TARGET_DATE': target_date,
+                            'DEPARTMENT': department_name,
+                            'CATEGORY': nfh_cat,
+                            'SUBCATEGORY': nfh_sub,
+                        })
                 if agent_message_count >= 2:
                     chats_with_2_plus_agent_messages += 1
                 if agent_message_count >= 3:
@@ -6929,6 +7607,29 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
                         _classified = True
                         break
     
+    # AT departments: override summary counts with reference CC SQL aggregates
+    if is_at_department and session is not None and target_date is not None:
+        try:
+            at_sql_metrics = get_at_sql_handling_metrics(
+                session, department_name, departments_config, target_date
+            )
+            if at_sql_metrics:
+                total_conversations = at_sql_metrics['supposed_cnt']
+                bot_handled_count = at_sql_metrics['handled_cnt']
+                bot_handled_excluding_fillers_count = at_sql_metrics['fully_bot_cnt']
+                chats_with_1_plus_agent_messages = at_sql_metrics['agent_1p_cnt']
+                chats_with_2_plus_agent_messages = at_sql_metrics['agent_2p_cnt']
+                chats_with_3_plus_agent_messages = at_sql_metrics['agent_3p_cnt']
+                chats_with_1_plus_agent_messages_excluding_pokes = at_sql_metrics['agent_1p_cnt']
+                print(
+                    f"    📊 AT SQL-aligned: pool={at_sql_metrics['supposed_cnt']}, "
+                    f"bot={at_sql_metrics['handled_cnt']}, fully={at_sql_metrics['fully_bot_cnt']}, "
+                    f"agent1+/2+/3+={at_sql_metrics['agent_1p_cnt']}/"
+                    f"{at_sql_metrics['agent_2p_cnt']}/{at_sql_metrics['agent_3p_cnt']}"
+                )
+        except Exception as at_sql_err:
+            print(f"    ⚠️  AT SQL metrics override failed: {at_sql_err}")
+
     # ── CC_Resolvers Handle Ratio denominator override ────────────────────
     # For CC_Resolvers, every Handle-Ratio family percentage (Handle Ratio,
     # its submetrics, and the pie-chart inputs) must EXCLUDE chats with 0 bot
@@ -6992,6 +7693,59 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     zero_bot_guardrail_autotransfer_percentage = _zero_bot_pct(zero_bot_guardrail_autotransfer_count)
     zero_bot_technical_issue_percentage = _zero_bot_pct(zero_bot_technical_issue_count)
     zero_bot_bot_delay_autotransfer_percentage = _zero_bot_pct(zero_bot_bot_delay_autotransfer_count)
+
+    # ── CC_Resolvers "Not Fully Handled" 6-category percentages ─────────────
+    # Each percentage is out of chats_with_1_plus_agent_messages (total NFH).
+    def _nfh_pct(count):
+        return (count / chats_with_1_plus_agent_messages * 100) if chats_with_1_plus_agent_messages > 0 else 0.0
+
+    nfh_tech_issue_autotransfer_count = nfh_category_counts.get('tech_issue_autotransfer', 0)
+    nfh_bot_delay_autotransfer_count = nfh_category_counts.get('bot_delay_autotransfer', 0)
+    nfh_bot_call_customer_count = nfh_category_counts.get('bot_call_customer', 0)
+    nfh_bot_transfer_cc_resolvers_count = nfh_category_counts.get('bot_transfer_cc_resolvers', 0)
+    nfh_review_complaint_intervention_count = nfh_category_counts.get('review_complaint_intervention', 0)
+    nfh_manual_agent_intervention_count = nfh_category_counts.get('manual_agent_intervention', 0)
+
+    nfh_tech_issue_autotransfer_percentage = _nfh_pct(nfh_tech_issue_autotransfer_count)
+    nfh_bot_delay_autotransfer_percentage = _nfh_pct(nfh_bot_delay_autotransfer_count)
+    nfh_bot_call_customer_percentage = _nfh_pct(nfh_bot_call_customer_count)
+    nfh_bot_transfer_cc_resolvers_percentage = _nfh_pct(nfh_bot_transfer_cc_resolvers_count)
+    nfh_review_complaint_intervention_percentage = _nfh_pct(nfh_review_complaint_intervention_count)
+    nfh_manual_agent_intervention_percentage = _nfh_pct(nfh_manual_agent_intervention_count)
+
+    # Category 1 subcategories (Call_Customer reasons)
+    _cc_subs = nfh_subcategory_counts.get('bot_call_customer', {})
+    nfh_bot_call_customer_standard_case_count = _cc_subs.get('standard_case', 0)
+    nfh_bot_call_customer_cancellation_case_count = _cc_subs.get('cancellation_case', 0)
+    nfh_bot_call_customer_client_threatening_case_count = _cc_subs.get('client_threatening_case', 0)
+    nfh_bot_call_customer_other_count = _cc_subs.get('other', 0)
+    nfh_bot_call_customer_standard_case_percentage = _nfh_pct(nfh_bot_call_customer_standard_case_count)
+    nfh_bot_call_customer_cancellation_case_percentage = _nfh_pct(nfh_bot_call_customer_cancellation_case_count)
+    nfh_bot_call_customer_client_threatening_case_percentage = _nfh_pct(nfh_bot_call_customer_client_threatening_case_count)
+    nfh_bot_call_customer_other_percentage = _nfh_pct(nfh_bot_call_customer_other_count)
+
+    # Category 2 subcategories (Transfer_Reason values)
+    _tr_subs = nfh_subcategory_counts.get('bot_transfer_cc_resolvers', {})
+    nfh_bot_transfer_second_request_to_speak_to_human_count = _tr_subs.get('second_request_to_speak_to_human', 0)
+    nfh_bot_transfer_refund_followup_count = _tr_subs.get('refund_followup', 0)
+    nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_count = _tr_subs.get('frustrated_liveout_client_taxi_transfer', 0)
+    nfh_bot_transfer_maid_manager_visit_handling_count = _tr_subs.get('maid_manager_visit_handling', 0)
+    nfh_bot_transfer_replacement_nationality_mismatch_count = _tr_subs.get('replacement_nationality_mismatch', 0)
+    nfh_bot_transfer_contract_modification_count = _tr_subs.get('contract_modification', 0)
+    nfh_bot_transfer_unofficial_maid_vacation_request_count = _tr_subs.get('unofficial_maid_vacation_request', 0)
+    nfh_bot_transfer_client_escalations_count = _tr_subs.get('client_escalations', 0)
+    nfh_bot_transfer_payment_or_billing_reasons_count = _tr_subs.get('payment_or_billing_reasons', 0)
+    nfh_bot_transfer_other_count = _tr_subs.get('other', 0)
+    nfh_bot_transfer_second_request_to_speak_to_human_percentage = _nfh_pct(nfh_bot_transfer_second_request_to_speak_to_human_count)
+    nfh_bot_transfer_refund_followup_percentage = _nfh_pct(nfh_bot_transfer_refund_followup_count)
+    nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_percentage = _nfh_pct(nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_count)
+    nfh_bot_transfer_maid_manager_visit_handling_percentage = _nfh_pct(nfh_bot_transfer_maid_manager_visit_handling_count)
+    nfh_bot_transfer_replacement_nationality_mismatch_percentage = _nfh_pct(nfh_bot_transfer_replacement_nationality_mismatch_count)
+    nfh_bot_transfer_contract_modification_percentage = _nfh_pct(nfh_bot_transfer_contract_modification_count)
+    nfh_bot_transfer_unofficial_maid_vacation_request_percentage = _nfh_pct(nfh_bot_transfer_unofficial_maid_vacation_request_count)
+    nfh_bot_transfer_client_escalations_percentage = _nfh_pct(nfh_bot_transfer_client_escalations_count)
+    nfh_bot_transfer_payment_or_billing_reasons_percentage = _nfh_pct(nfh_bot_transfer_payment_or_billing_reasons_count)
+    nfh_bot_transfer_other_percentage = _nfh_pct(nfh_bot_transfer_other_count)
 
     # Calculate percentage for CC_Resolvers handle ratio when bot responds
     bot_handled_with_bot_response_percentage = (bot_handled_with_bot_response_count / conversations_with_bot_response_count * 100) if conversations_with_bot_response_count > 0 else 0
@@ -7161,6 +7915,49 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         'zero_bot_uncategorized_count': zero_bot_uncategorized_count,
         # Per-chat detail rows for ZERO_BOT_DETAILS_TABLE (CC_Resolvers only)
         'zero_bot_category_rows': zero_bot_category_rows,
+        # CC_Resolvers "Not Fully Handled" 6-category breakdown
+        'nfh_tech_issue_autotransfer_count': nfh_tech_issue_autotransfer_count,
+        'nfh_tech_issue_autotransfer_percentage': nfh_tech_issue_autotransfer_percentage,
+        'nfh_bot_delay_autotransfer_count': nfh_bot_delay_autotransfer_count,
+        'nfh_bot_delay_autotransfer_percentage': nfh_bot_delay_autotransfer_percentage,
+        'nfh_bot_call_customer_count': nfh_bot_call_customer_count,
+        'nfh_bot_call_customer_percentage': nfh_bot_call_customer_percentage,
+        'nfh_bot_call_customer_standard_case_count': nfh_bot_call_customer_standard_case_count,
+        'nfh_bot_call_customer_standard_case_percentage': nfh_bot_call_customer_standard_case_percentage,
+        'nfh_bot_call_customer_cancellation_case_count': nfh_bot_call_customer_cancellation_case_count,
+        'nfh_bot_call_customer_cancellation_case_percentage': nfh_bot_call_customer_cancellation_case_percentage,
+        'nfh_bot_call_customer_client_threatening_case_count': nfh_bot_call_customer_client_threatening_case_count,
+        'nfh_bot_call_customer_client_threatening_case_percentage': nfh_bot_call_customer_client_threatening_case_percentage,
+        'nfh_bot_call_customer_other_count': nfh_bot_call_customer_other_count,
+        'nfh_bot_call_customer_other_percentage': nfh_bot_call_customer_other_percentage,
+        'nfh_bot_transfer_cc_resolvers_count': nfh_bot_transfer_cc_resolvers_count,
+        'nfh_bot_transfer_cc_resolvers_percentage': nfh_bot_transfer_cc_resolvers_percentage,
+        'nfh_bot_transfer_second_request_to_speak_to_human_count': nfh_bot_transfer_second_request_to_speak_to_human_count,
+        'nfh_bot_transfer_second_request_to_speak_to_human_percentage': nfh_bot_transfer_second_request_to_speak_to_human_percentage,
+        'nfh_bot_transfer_refund_followup_count': nfh_bot_transfer_refund_followup_count,
+        'nfh_bot_transfer_refund_followup_percentage': nfh_bot_transfer_refund_followup_percentage,
+        'nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_count': nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_count,
+        'nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_percentage': nfh_bot_transfer_frustrated_liveout_client_taxi_transfer_percentage,
+        'nfh_bot_transfer_maid_manager_visit_handling_count': nfh_bot_transfer_maid_manager_visit_handling_count,
+        'nfh_bot_transfer_maid_manager_visit_handling_percentage': nfh_bot_transfer_maid_manager_visit_handling_percentage,
+        'nfh_bot_transfer_replacement_nationality_mismatch_count': nfh_bot_transfer_replacement_nationality_mismatch_count,
+        'nfh_bot_transfer_replacement_nationality_mismatch_percentage': nfh_bot_transfer_replacement_nationality_mismatch_percentage,
+        'nfh_bot_transfer_contract_modification_count': nfh_bot_transfer_contract_modification_count,
+        'nfh_bot_transfer_contract_modification_percentage': nfh_bot_transfer_contract_modification_percentage,
+        'nfh_bot_transfer_unofficial_maid_vacation_request_count': nfh_bot_transfer_unofficial_maid_vacation_request_count,
+        'nfh_bot_transfer_unofficial_maid_vacation_request_percentage': nfh_bot_transfer_unofficial_maid_vacation_request_percentage,
+        'nfh_bot_transfer_client_escalations_count': nfh_bot_transfer_client_escalations_count,
+        'nfh_bot_transfer_client_escalations_percentage': nfh_bot_transfer_client_escalations_percentage,
+        'nfh_bot_transfer_payment_or_billing_reasons_count': nfh_bot_transfer_payment_or_billing_reasons_count,
+        'nfh_bot_transfer_payment_or_billing_reasons_percentage': nfh_bot_transfer_payment_or_billing_reasons_percentage,
+        'nfh_bot_transfer_other_count': nfh_bot_transfer_other_count,
+        'nfh_bot_transfer_other_percentage': nfh_bot_transfer_other_percentage,
+        'nfh_review_complaint_intervention_count': nfh_review_complaint_intervention_count,
+        'nfh_review_complaint_intervention_percentage': nfh_review_complaint_intervention_percentage,
+        'nfh_manual_agent_intervention_count': nfh_manual_agent_intervention_count,
+        'nfh_manual_agent_intervention_percentage': nfh_manual_agent_intervention_percentage,
+        # Per-chat detail rows for EVALS_NFH_DETAILS (CC_Resolvers only)
+        'nfh_category_rows': nfh_category_rows,
         'proactive_agent_messages_count': proactive_agent_messages_count,
         'proactive_agent_messages_percentage': proactive_agent_messages_percentage,
         'directly_handled_by_seniors_count': directly_handled_by_seniors_count,
@@ -7404,7 +8201,71 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
             print(f"    ⚠️  Failed to save chats with n plus agent messages data: {str(e)}")
     else:
         print(f"    ℹ️  No chats with n plus agent messages found for {department_name}")
-    
+
+    # AT Transfer tracking — query CC_TRANSFERS for conversations processed above
+    if is_at_department:
+        try:
+            cc_bot_skills_t = _at_cc_sql_bot_skills(department_name, departments_config)
+
+            if cc_bot_skills_t:
+                transfer_query = _at_cc_supposed_bot_ctes_sql(target_date, cc_bot_skills_t, use_exists=True) + """,
+                chats_with_transfers AS (
+                  SELECT DISTINCT t.conversation_id AS CONVERSATION_ID, t.target_skill_name AS TARGET_SKILL_NAME
+                  FROM supposed_bot s
+                  JOIN BA_VIEWS.CHATCC_SILVER.CC_TRANSFERS t ON t.conversation_id = s.conversation_id
+                  WHERE t.INTERACTION_TYPE = 'TRANSFER_CONVERSATION'
+                    AND EXISTS (SELECT 1 FROM skills ss WHERE ss.skill_name = t.SOURCE_SKILL_NAME)
+                    AND NOT EXISTS (SELECT 1 FROM skills ts WHERE ts.skill_name = t.TARGET_SKILL_NAME)
+                )
+                SELECT CONVERSATION_ID, TARGET_SKILL_NAME FROM chats_with_transfers
+                """
+                transfer_df_at = session.sql(transfer_query).to_pandas()
+                transfer_metrics = _at_compute_transfer_metrics(transfer_df_at, department_name, departments_config)
+
+                agent_init_ref_dept = _at_agent_initiated_source_department(
+                    department_name, departments_config
+                )
+                if agent_init_ref_dept:
+                    transfer_metrics['at_agent_initiated_shared_outside_uae_count'] = (
+                        get_at_sql_agent_initiated_shared_outside_uae_count(
+                            session, agent_init_ref_dept, departments_config, target_date
+                        )
+                    )
+
+                results.update(transfer_metrics)
+
+                agent_init_log = (
+                    f", agent_init_shared={transfer_metrics['at_agent_initiated_shared_outside_uae_count']}"
+                    if agent_init_ref_dept else ''
+                )
+                if department_name in ('AT_Filipina_Outside_UAE', 'AT_African'):
+                    extra = (
+                        f", in_phl_bot={transfer_metrics['at_transfer_to_in_phl_bot_count']}"
+                        if department_name == 'AT_Filipina_Outside_UAE' else ''
+                    )
+                    print(
+                        f"    🔄 AT Transfers: total={transfer_metrics['at_transfers_total_count']}, "
+                        f"agents={transfer_metrics['at_transfer_to_agents_count']}, "
+                        f"hustlers={transfer_metrics['at_transfer_to_hustlers_count']}, "
+                        f"inside_uae={transfer_metrics['at_transfer_to_inside_uae_count']}"
+                        f"{extra}{agent_init_log}"
+                    )
+                else:
+                    print(
+                        f"    🔄 AT Transfers: total={transfer_metrics['at_transfers_total_count']}, "
+                        f"agents={transfer_metrics['at_transfer_to_agents_count']}, "
+                        f"hustlers={transfer_metrics['at_transfer_to_hustlers_count']}, "
+                        f"no_av={transfer_metrics['at_transfer_to_no_av_count']}, "
+                        f"inside_uae={transfer_metrics['at_transfer_to_inside_uae_count']}, "
+                        f"outside_uae={transfer_metrics['at_transfer_to_outside_uae_count']}"
+                        f"{agent_init_log}"
+                    )
+            else:
+                results.update(_at_empty_transfer_metrics())
+        except Exception as e:
+            print(f"    ⚠️  AT transfer tracking failed: {str(e)}")
+            results.update(_at_empty_transfer_metrics())
+
     return results
 
 
@@ -7818,6 +8679,174 @@ def detect_conversation_repetitions_with_column_snowflake(conversation_df, depar
     return modified_df, has_repetition, repetition_score, repetition_details, static_exclusion_score, dynamic_normal_score, static_exclusion_unique_count, dynamic_normal_unique_count
 
 
+def get_at_sql_repetition_conv_ids(session, department_name, departments_config, target_date):
+    """
+    Return conversation IDs with exact bot-text repetition using reference SQL logic.
+    Uses CC_CONVERSATIONS supposed_bot pool + CC_MESSAGES msg_window (not APPLICANTS_CHATS).
+    """
+    bot_skills = _at_cc_sql_bot_skills(department_name, departments_config)
+    if not bot_skills:
+        return set()
+
+    repetition_query = _at_cc_supposed_bot_ctes_sql(target_date, bot_skills, use_exists=True, include_text=True) + """,
+    bot_repetition_convs AS (
+      SELECT DISTINCT conversation_id
+      FROM (
+        SELECT
+          s.conversation_id,
+          mw.TEXT,
+          COUNT(*) AS bot_same_text_cnt
+        FROM supposed_bot s
+        JOIN msg_window mw ON mw.conversation_id = s.conversation_id
+        WHERE UPPER(TRIM(mw.sent_by)) = 'BOT'
+          AND mw.TEXT IS NOT NULL
+        GROUP BY 1, 2
+        HAVING COUNT(*) >= 2
+      )
+    )
+    SELECT conversation_id AS CONVERSATION_ID FROM bot_repetition_convs
+    """
+    rep_df = session.sql(repetition_query).to_pandas()
+    return set(rep_df['CONVERSATION_ID'].unique()) if not rep_df.empty else set()
+
+
+def get_at_sql_unresponsive_conv_ids(session, department_name, departments_config, target_date):
+    """
+    Return conversation IDs where the last message in CC msg_window is from CONSUMER.
+    Matches reference SQL unresponsive CTE on the supposed_bot pool.
+    """
+    bot_skills = _at_cc_sql_bot_skills(department_name, departments_config)
+    if not bot_skills:
+        return set()
+
+    unresponsive_query = _at_cc_supposed_bot_ctes_sql(target_date, bot_skills, use_exists=True) + """,
+    last_msg_in_window AS (
+      SELECT conversation_id, UPPER(TRIM(sent_by)) AS last_sent_by
+      FROM msg_window
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY message_time DESC) = 1
+    ),
+    unresponsive AS (
+      SELECT s.conversation_id
+      FROM supposed_bot s
+      JOIN last_msg_in_window lm ON lm.conversation_id = s.conversation_id
+      WHERE lm.last_sent_by = 'CONSUMER'
+    )
+    SELECT conversation_id AS CONVERSATION_ID FROM unresponsive
+    """
+    unresp_df = session.sql(unresponsive_query).to_pandas()
+    return set(unresp_df['CONVERSATION_ID'].unique()) if not unresp_df.empty else set()
+
+
+def get_at_sql_delay_metrics(session, department_name, departments_config, target_date):
+    """
+    CC-SQL delay metrics on supposed_bot pool (reference mw_ordered / replies_after_consumer).
+    Returns avg initial/non-initial (<=240s instances) and >4min counts per instance.
+
+    Only BOT replies count as the delayed message; AGENT replies are excluded from all
+    four metrics (avg initial, avg non-initial, >4min initial, >4min non-initial).
+    """
+    bot_skills = _at_cc_sql_bot_skills(department_name, departments_config)
+    if not bot_skills:
+        return {}
+
+    delay_query = _at_cc_supposed_bot_ctes_sql(target_date, bot_skills, use_exists=True) + """,
+    mw_ordered AS (
+      SELECT
+        s.conversation_id,
+        mw.message_time,
+        UPPER(TRIM(mw.sent_by)) AS sent_by,
+        ROW_NUMBER() OVER (PARTITION BY s.conversation_id ORDER BY mw.message_time) AS msg_rn
+      FROM supposed_bot s
+      JOIN msg_window mw ON mw.conversation_id = s.conversation_id
+    ),
+    convs_first_is_consumer AS (
+      SELECT conversation_id
+      FROM mw_ordered
+      QUALIFY msg_rn = 1 AND sent_by = 'CONSUMER'
+    ),
+    consumer_msgs AS (
+      SELECT
+        conversation_id,
+        message_time AS consumer_time,
+        ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY message_time) AS consumer_rn
+      FROM mw_ordered
+      WHERE sent_by = 'CONSUMER'
+    ),
+    replies_after_consumer AS (
+      SELECT
+        c.conversation_id,
+        c.consumer_rn,
+        c.consumer_time,
+        MIN(r.message_time) AS reply_time
+      FROM consumer_msgs c
+      JOIN mw_ordered r
+        ON r.conversation_id = c.conversation_id
+       AND r.message_time > c.consumer_time
+       AND r.sent_by = 'BOT'
+      GROUP BY 1, 2, 3
+    ),
+    initial_delay_instances AS (
+      SELECT
+        r.conversation_id,
+        DATEDIFF('second', r.consumer_time, r.reply_time) AS delay_seconds
+      FROM replies_after_consumer r
+      JOIN convs_first_is_consumer fc ON fc.conversation_id = r.conversation_id
+      WHERE r.consumer_rn = 1
+        AND r.reply_time IS NOT NULL
+    ),
+    non_initial_delay_instances AS (
+      SELECT
+        conversation_id,
+        DATEDIFF('second', consumer_time, reply_time) AS delay_seconds
+      FROM replies_after_consumer
+      WHERE consumer_rn >= 2
+        AND reply_time IS NOT NULL
+    ),
+    avg_initial_delay AS (
+      SELECT AVG(delay_seconds) AS avg_delay_seconds
+      FROM initial_delay_instances
+      WHERE delay_seconds <= 240
+    ),
+    avg_non_initial_delay AS (
+      SELECT AVG(delay_seconds) AS avg_delay_seconds
+      FROM non_initial_delay_instances
+      WHERE delay_seconds <= 240
+    ),
+    delay_over_4_mins_initial AS (
+      SELECT COUNT(*) AS over_4_mins_initial_cnt
+      FROM initial_delay_instances
+      WHERE delay_seconds > 240
+    ),
+    delay_over_4_mins_non_initial AS (
+      SELECT COUNT(*) AS over_4_mins_non_initial_cnt
+      FROM non_initial_delay_instances
+      WHERE delay_seconds > 240
+    )
+    SELECT
+      (SELECT avg_delay_seconds FROM avg_initial_delay) AS AVG_INITIAL_DELAY_SECONDS,
+      (SELECT avg_delay_seconds FROM avg_non_initial_delay) AS AVG_NON_INITIAL_DELAY_SECONDS,
+      (SELECT over_4_mins_initial_cnt FROM delay_over_4_mins_initial) AS DELAY_OVER_4_MINS_INITIAL_CNT,
+      (SELECT over_4_mins_non_initial_cnt FROM delay_over_4_mins_non_initial) AS DELAY_OVER_4_MINS_NON_INITIAL_CNT
+    """
+    df = session.sql(delay_query).to_pandas()
+    if df.empty:
+        return {}
+
+    row = df.iloc[0]
+
+    def _float_or_none(val):
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return None
+        return float(val)
+
+    return {
+        'avg_initial_delay_seconds': _float_or_none(row.get('AVG_INITIAL_DELAY_SECONDS')),
+        'avg_non_initial_delay_seconds': _float_or_none(row.get('AVG_NON_INITIAL_DELAY_SECONDS')),
+        'delay_over_4_mins_initial_count': int(row.get('DELAY_OVER_4_MINS_INITIAL_CNT', 0) or 0),
+        'delay_over_4_mins_non_initial_count': int(row.get('DELAY_OVER_4_MINS_NON_INITIAL_CNT', 0) or 0),
+    }
+
+
 def analyze_repetition_conversations_single_department(session, df, department_name, departments_config, target_date):
     """
     Analyze repetition patterns for a single department and save raw data.
@@ -7861,12 +8890,35 @@ def analyze_repetition_conversations_single_department(session, df, department_n
     total_static_exclusion_unique_count = 0
     total_dynamic_normal_unique_count = 0
     
-    for conv_id, conv_df in conversations:
-        # Use the enhanced function that adds the repetition column and breakdown scores
-        modified_conv_df, has_repetition, repetition_score, repetition_details, static_exclusion_score, dynamic_normal_score, static_exclusion_unique_count, dynamic_normal_unique_count = detect_conversation_repetitions_with_column_snowflake(
-            conv_df, department_name, departments_config
+    use_at_sql_repetition = department_name in _AT_DEPARTMENTS
+
+    at_sql_repetition_conv_ids = set()
+    if use_at_sql_repetition:
+        at_sql_repetition_conv_ids = get_at_sql_repetition_conv_ids(
+            session, department_name, departments_config, target_date
         )
-        
+        in_pool = len(at_sql_repetition_conv_ids & set(df['CONVERSATION_ID'].unique()))
+        n_skills = len(_at_cc_sql_bot_skills(department_name, departments_config))
+        print(f"    📨 AT repetition (SQL supposed_bot, {n_skills} CC skills): {len(at_sql_repetition_conv_ids)} total, {in_pool} in filtered pool")
+
+    for conv_id, conv_df in conversations:
+        if use_at_sql_repetition:
+            has_repetition = conv_id in at_sql_repetition_conv_ids
+            repetition_score = 1 if has_repetition else 0
+            static_exclusion_score = 0
+            dynamic_normal_score = repetition_score
+            static_exclusion_unique_count = 0
+            dynamic_normal_unique_count = repetition_score
+            modified_conv_df = conv_df.copy()
+            modified_conv_df['REPETITION'] = -1
+            modified_conv_df['HAS_REPETITION'] = has_repetition
+            modified_conv_df['REPETITION_SCORE'] = repetition_score
+        else:
+            # Use the enhanced function that adds the repetition column and breakdown scores
+            modified_conv_df, has_repetition, repetition_score, repetition_details, static_exclusion_score, dynamic_normal_score, static_exclusion_unique_count, dynamic_normal_unique_count = detect_conversation_repetitions_with_column_snowflake(
+                conv_df, department_name, departments_config
+            )
+
         if has_repetition:
             repetition_conversation_count += 1
             total_repetition_score += repetition_score
@@ -7880,8 +8932,6 @@ def analyze_repetition_conversations_single_department(session, df, department_n
             modified_conv_df['CONVERSATION_REPETITION_SCORE'] = repetition_score
             modified_conv_df['CONVERSATION_STATIC_EXCLUSION_SCORE'] = static_exclusion_score
             modified_conv_df['CONVERSATION_DYNAMIC_NORMAL_SCORE'] = dynamic_normal_score
-            
-
             
             repetition_conversations_dfs.append(modified_conv_df)
     
@@ -8721,9 +9771,10 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES': bot_data.get('CHATS_WITH_EXACTLY_3_AGENT_MESSAGES', 0),
             'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE', 0), 2),
             'AVG_BOT_MSGS_BEFORE_TRANSFER': bot_data.get('avg_bot_msgs_before_transfer', None),
-            'TRANSFERRED_CONVERSATION_COUNT': bot_data.get('transferred_conversation_count', 0),
+            'TRANSFERRED_CONVERSATION_COUNT': _at_transferred_conversation_count(bot_data, department_name),
             'MCD_MV_TRANSFER_COUNT': bot_data.get('mcd_mv_transfer_count', 0),
             'MCD_CC_TRANSFER_COUNT': bot_data.get('mcd_cc_transfer_count', 0),
+            **_at_master_transfer_table_columns(department_name, bot_data),
             # Exclusion breakdown: chats removed on the way from ChatCC to Chats_Supposed_to_be_Bot_Handled
             'Excluded_No_Engagement_Chats': excluded_no_engagement,
             'Excluded_No_Bot_Skill_Chats':  excluded_no_bot_skill,
@@ -8760,7 +9811,7 @@ def create_combined_metrics_snowflake(bot_results, repetition_results, target_da
             'ZERO_BOT_TECHNICAL_ISSUE_PERCENTAGE': round(bot_data.get('zero_bot_technical_issue_percentage', 0), 2),
             'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_COUNT': bot_data.get('zero_bot_bot_delay_autotransfer_count', 0),
             'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_PERCENTAGE': round(bot_data.get('zero_bot_bot_delay_autotransfer_percentage', 0), 2),
-            
+
             # Call Requests Metrics
             'Call_Requests_Count': bot_data.get('call_requests_count', 0),
             'Call_Requests_Percentage': round(bot_data.get('call_requests_percentage', 0), 2),
@@ -9015,6 +10066,20 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'TRANSFERRED_CONVERSATION_COUNT': 'NUMBER',
                 'MCD_MV_TRANSFER_COUNT': 'NUMBER',
                 'MCD_CC_TRANSFER_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_AGENTS_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_AGENTS_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_HUSTLERS_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_HUSTLERS_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_NO_AV_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_NO_AV_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_INSIDE_UAE_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_INSIDE_UAE_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_OUTSIDE_UAE_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_OUTSIDE_UAE_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_IN_PHL_BOT_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_IN_PHL_BOT_PERCENTAGE': 'FLOAT',
+                'AT_AGENT_INITIATED_SHARED_OUTSIDE_UAE_COUNT': 'NUMBER',
+                'AT_AGENT_INITIATED_SHARED_OUTSIDE_UAE_PERCENTAGE': 'FLOAT',
                 'Call_Requests_Count': 'NUMBER',
                 'Call_Requests_Percentage': 'FLOAT',
                 'Agent_Intervention_Percentage': 'FLOAT',
@@ -9213,6 +10278,20 @@ def update_master_metrics_table_snowflake(session: snowpark.Session, combined_me
                 'TRANSFERRED_CONVERSATION_COUNT':'NUMBER',
                 'MCD_MV_TRANSFER_COUNT':         'NUMBER',
                 'MCD_CC_TRANSFER_COUNT':         'NUMBER',
+                'AT_TRANSFER_TO_AGENTS_COUNT':   'NUMBER',
+                'AT_TRANSFER_TO_AGENTS_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_HUSTLERS_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_HUSTLERS_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_NO_AV_COUNT':  'NUMBER',
+                'AT_TRANSFER_TO_NO_AV_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_INSIDE_UAE_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_INSIDE_UAE_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_OUTSIDE_UAE_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_OUTSIDE_UAE_PERCENTAGE': 'FLOAT',
+                'AT_TRANSFER_TO_IN_PHL_BOT_COUNT': 'NUMBER',
+                'AT_TRANSFER_TO_IN_PHL_BOT_PERCENTAGE': 'FLOAT',
+                'AT_AGENT_INITIATED_SHARED_OUTSIDE_UAE_COUNT': 'NUMBER',
+                'AT_AGENT_INITIATED_SHARED_OUTSIDE_UAE_PERCENTAGE': 'FLOAT',
                 'CHATS_INITIATED_BY_US':         'NUMBER',
                 'CHATS_INITIATED_BY_CLIENT':     'NUMBER',
                 'TOTAL_UNIQUE_CLIENTS':          'NUMBER',
@@ -9411,6 +10490,129 @@ def update_zero_bot_msg_details_table_snowflake(session: snowpark.Session, bot_r
         return False
 
 
+def update_not_fully_handled_details_table_snowflake(session: snowpark.Session, bot_results, target_date):
+    """Persist per-chat detail rows for the CC_Resolvers 'Not Fully Handled'
+    6-category breakdown to a Snowflake table.
+
+    Each row represents one CC_Resolvers conversation where the bot sent at
+    least one message but agents still intervened, along with the single
+    category (and optional subcategory) it was classified into by
+    ``classify_cc_resolvers_not_fully_handled_chat``.
+
+    Table schema (created on first run):
+
+        CONVERSATION_ID  VARCHAR
+        TARGET_DATE      VARCHAR(50)
+        DEPARTMENT       VARCHAR(100)
+        CATEGORY         VARCHAR(100)
+        SUBCATEGORY      VARCHAR(100)
+        INSERTED_AT      TIMESTAMP_NTZ
+
+    The destination table name is read from the ``NFH_DETAILS_TABLE`` global
+    (e.g. set in the notebook), defaulting to ``EVALS_NFH_DETAILS_test_only``.
+
+    Existing rows for the same (TARGET_DATE, DEPARTMENT) are deleted before
+    insert so re-running the pipeline for the same date is idempotent.
+
+    Args:
+        session: Snowflake session.
+        bot_results: dict keyed by department name -> per-department results
+            dict produced by ``analyze_bot_handled_conversations_single_department``.
+            Only entries that include ``nfh_category_rows`` (i.e. CC_Resolvers)
+            contribute rows.
+        target_date: Run date string (YYYY-MM-DD).
+
+    Returns:
+        bool: True on success (including the no-rows case), False on error.
+    """
+    table_name = globals().get('NFH_DETAILS_TABLE', 'EVALS_NFH_DETAILS_test_only')
+    print(f"\n📂 UPDATING NOT-FULLY-HANDLED DETAILS TABLE ({table_name})...")
+
+    try:
+        # Collect all detail rows from every department's results.
+        all_rows = []
+        for dept_name, dept_results in (bot_results or {}).items():
+            if not isinstance(dept_results, dict):
+                continue
+            rows = dept_results.get('nfh_category_rows', []) or []
+            for r in rows:
+                all_rows.append({
+                    'CONVERSATION_ID': r.get('CONVERSATION_ID'),
+                    'TARGET_DATE': r.get('TARGET_DATE', target_date),
+                    'DEPARTMENT': r.get('DEPARTMENT', dept_name),
+                    'CATEGORY': r.get('CATEGORY'),
+                    'SUBCATEGORY': r.get('SUBCATEGORY', ''),
+                })
+
+        if not all_rows:
+            print(f"  ℹ️  No NFH detail rows to write for {target_date}. Skipping.")
+            return True
+
+        details_df = pd.DataFrame(all_rows)
+        details_df['INSERTED_AT'] = datetime.now()
+
+        departments_to_update = details_df['DEPARTMENT'].unique().tolist()
+        print(f"  Rows to write: {len(details_df)}")
+        print(f"  Departments: {departments_to_update}")
+
+        # Check if table exists.
+        try:
+            check_query = f"""
+            SELECT COUNT(*) AS count
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = UPPER('{table_name}')
+            AND TABLE_SCHEMA = CURRENT_SCHEMA()
+            """
+            exists = session.sql(check_query).collect()[0]['COUNT'] > 0
+        except Exception:
+            exists = False
+
+        # Create the table if it doesn't exist.
+        if not exists:
+            print(f"  Table {table_name} does not exist. Creating it...")
+            create_query = f"""
+            CREATE TABLE {table_name} (
+                CONVERSATION_ID VARCHAR,
+                TARGET_DATE VARCHAR(50),
+                DEPARTMENT VARCHAR(100),
+                CATEGORY VARCHAR(100),
+                SUBCATEGORY VARCHAR(100),
+                INSERTED_AT TIMESTAMP_NTZ
+            )
+            """
+            session.sql(create_query).collect()
+            print(f"  ✅ Created {table_name}")
+
+        # Idempotency — delete existing rows for this (TARGET_DATE, DEPARTMENT).
+        departments_str = "', '".join(departments_to_update)
+        delete_query = f"""
+        DELETE FROM {table_name}
+        WHERE TARGET_DATE = '{target_date}'
+        AND DEPARTMENT IN ('{departments_str}')
+        """
+        session.sql(delete_query).collect()
+        print(f"  Deleted existing rows for {target_date} / {departments_to_update}")
+
+        # Write new rows.
+        snowpark_df = session.create_dataframe(details_df)
+        snowpark_df.write.mode("append").save_as_table(table_name)
+
+        count_query = f"""
+        SELECT COUNT(*) AS ROW_COUNT
+        FROM {table_name}
+        WHERE TARGET_DATE = '{target_date}'
+        """
+        final_count = session.sql(count_query).collect()[0]['ROW_COUNT']
+        print(f"  ✅ Wrote {len(details_df)} rows to {table_name}. Total rows for {target_date}: {final_count}")
+        return True
+
+    except Exception as e:
+        error_report = format_error_details(e, "UPDATING NFH DETAILS")
+        print(f"❌ Failed to update NFH details table: {str(e)}")
+        print(error_report)
+        return False
+
+
 def phase2_core_analytics_processor(session: snowpark.Session, target_date=None):
     """
     Phase 2 Core Analytics Processor: Bot Handling + Repetition Analysis
@@ -9467,6 +10669,11 @@ def phase2_core_analytics_processor(session: snowpark.Session, target_date=None)
 
         # Step 6b: Update 0-bot-msg per-chat details table (CC_Resolvers only).
         zero_bot_details_success = update_zero_bot_msg_details_table_snowflake(
+            session, bot_results, target_date_str
+        )
+
+        # Step 6c: Update Not-Fully-Handled per-chat details table (CC_Resolvers only).
+        nfh_details_success = update_not_fully_handled_details_table_snowflake(
             session, bot_results, target_date_str
         )
 
@@ -9943,6 +11150,7 @@ def calculate_delay_method1_snowflake(bot_message_time, conversation_df, bot_mes
     """
     Method 1: Find nearest consumer message right before the bot message.
     Only calculate delay if NO bot or agent has responded to the consumer yet.
+    Delay is only measured for BOT replies (callers must pass a bot message index).
     Adapted from main_analytics.py calculate_delay_method1()
     
     Args:
@@ -9953,6 +11161,9 @@ def calculate_delay_method1_snowflake(bot_message_time, conversation_df, bot_mes
     Returns:
         Delay in seconds or None
     """
+    delayed_row = conversation_df.loc[conversation_df['MESSAGE_INDEX'] == bot_message_index]
+    if delayed_row.empty or str(delayed_row.iloc[0].get('SENT_BY', '')).upper() != 'BOT':
+        return None
     # Get all consumer messages before this bot message (using Snowflake column names)
     consumer_messages = conversation_df[
         (conversation_df['SENT_BY'].str.upper() == 'CONSUMER') & 
@@ -11542,15 +12753,25 @@ def analyze_delay_conversations_single_department(session, df, department_name, 
         'agent_interventions_no_response_count': len(agent_interventions),
         'normal_agent_interventions_count': len(normal_agent_interventions)
     }
+
+    if department_name in _AT_DEPARTMENTS and session is not None and target_date is not None:
+        at_delay = get_at_sql_delay_metrics(
+            session, department_name, departments_config, target_date
+        )
+        if at_delay:
+            results['avg_method1_initial_delay'] = at_delay.get('avg_initial_delay_seconds')
+            results['avg_method1_non_initial_delay'] = at_delay.get('avg_non_initial_delay_seconds')
+            results['method1_initial_outliers'] = at_delay.get('delay_over_4_mins_initial_count', 0)
+            results['method1_non_initial_outliers'] = at_delay.get('delay_over_4_mins_non_initial_count', 0)
     
     # Print summary with outlier information
-    method1_init = f"{dept_averages['avg_method1_initial_delay']:.1f}s" if dept_averages['avg_method1_initial_delay'] else "N/A"
-    method1_non = f"{dept_averages['avg_method1_non_initial_delay']:.1f}s" if dept_averages['avg_method1_non_initial_delay'] else "N/A"
+    method1_init = f"{results['avg_method1_initial_delay']:.1f}s" if results.get('avg_method1_initial_delay') else "N/A"
+    method1_non = f"{results['avg_method1_non_initial_delay']:.1f}s" if results.get('avg_method1_non_initial_delay') else "N/A"
     
     # Format outlier counts for display
     threshold_mins = DELAY_OUTLIER_THRESHOLD_SECONDS / 60
-    init_outliers = method_outlier_counts['method1_initial_outliers']
-    non_init_outliers = method_outlier_counts['method1_non_initial_outliers']
+    init_outliers = results['method1_initial_outliers']
+    non_init_outliers = results['method1_non_initial_outliers']
     
     print(f"    ✅ Method1 - Initial: {method1_init} (excluding {init_outliers} message outliers >{threshold_mins:.0f}min), Non-Initial: {method1_non} (excluding {non_init_outliers} message outliers >{threshold_mins:.0f}min)")
     
@@ -11776,7 +12997,7 @@ def analyze_downtime_conversations_all_departments(session: snowpark.Session, ta
         }
         continue
         
-        if department_name != DEPARTMENT_FILTER and TEST:
+        if department_name!=DEPARTMENT_FILTER and TEST:
             continue
         
         try:
@@ -11809,12 +13030,13 @@ def analyze_downtime_conversations_all_departments(session: snowpark.Session, ta
 # UNRESPONSIVE CONVERSATION ANALYSIS
 # ============================================================================
 
-def is_conversation_unresponsive_snowflake(conversation_df, department_name, departments_config, bot_routed_no_response=None):
+def is_conversation_unresponsive_snowflake(conversation_df, department_name, departments_config, session=None, target_date=None):
     """
     Check if a conversation is unresponsive based on the criteria (Snowflake version).
     IMPROVED VERSION: Measures delay to FIRST bot response, not last bot message.
-    
-    CASE 0: Bot-routed-no-response conversations (pre-identified) → UNRESPONSIVE
+
+    AT departments: reference SQL rule — last message in CC msg_window = CONSUMER on supposed_bot pool.
+
     CASE 1: Last normal message from consumer → UNRESPONSIVE
     CASE 2: Last normal message from department bot AND >55min delay to FIRST bot response
     - Find the time between the last consumer message and the FIRST bot message after that
@@ -11829,7 +13051,8 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
         conversation_df: DataFrame containing one conversation's messages
         department_name: Department name for skill filtering
         departments_config: Department configuration dictionary
-        bot_routed_no_response: Set of conversation IDs that are bot-routed with no responses
+        session: Snowflake session (required for AT departments)
+        target_date: Target analysis date (required for AT departments)
     
     Returns:
         Tuple: (is_unresponsive, reason)
@@ -11840,12 +13063,19 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
     
     if department_name not in departments_config:
         return False, f"Unknown department: {department_name}"
-    
-    # CASE 0: Check if this conversation is in bot-routed-no-response set (pre-identified)
-    if bot_routed_no_response is not None:
-        conv_id = conversation_df['CONVERSATION_ID'].iloc[0] if len(conversation_df) > 0 else None
-        if conv_id in bot_routed_no_response:
-            return True, "Bot-routed with no agent/bot responses (pre-identified)"
+
+    if department_name in _AT_DEPARTMENTS:
+        if session is None or target_date is None:
+            return False, "AT unresponsive requires session and target_date"
+        cache_key = (department_name, str(target_date))
+        if cache_key not in _AT_UNRESPONSIVE_SQL_CACHE:
+            _AT_UNRESPONSIVE_SQL_CACHE[cache_key] = get_at_sql_unresponsive_conv_ids(
+                session, department_name, departments_config, target_date
+            )
+        conv_id = conversation_df['CONVERSATION_ID'].iloc[0]
+        if conv_id in _AT_UNRESPONSIVE_SQL_CACHE[cache_key]:
+            return True, "Last message in CC msg_window from consumer"
+        return False, "Last message in CC msg_window not from consumer"
     
     department_config = departments_config[department_name]
     bot_skills = set(department_config['bot_skills'])
@@ -12009,15 +13239,12 @@ def is_conversation_unresponsive_snowflake(conversation_df, department_name, dep
 
         except Exception as e:
             return False, f"Error calculating time difference: {str(e)}"
-        
-        except Exception as e:
-            return False, f"Error calculating time difference: {str(e)}"
     
     # If last normal message is from agent, conversation is considered resolved
     return False, "Last normal message from agent (resolved)"
 
 
-def analyze_unresponsive_conversations_single_department(session, df, department_name, departments_config, target_date, bot_routed_no_response=None):
+def analyze_unresponsive_conversations_single_department(session, df, department_name, departments_config, target_date):
     """
     Analyze unresponsive patterns for a single department and save raw data.
     Adapted from main_analytics.py analyze_unresponsive_conversations()
@@ -12028,7 +13255,6 @@ def analyze_unresponsive_conversations_single_department(session, df, department
         department_name: Department name
         departments_config: Department configuration
         target_date: Target date for analysis
-        bot_routed_no_response: Set of conversation IDs that are bot-routed with no responses
     
     Returns:
         unresponsive_results dictionary
@@ -12041,29 +13267,25 @@ def analyze_unresponsive_conversations_single_department(session, df, department
             'total_conversations': 0,
             'unresponsive_count': 0,
             'unresponsive_percentage': 0.0,
-            'bot_routed_no_response_count': 0
         }
     
-    # Default to empty set if not provided
-    if bot_routed_no_response is None:
-        bot_routed_no_response = set()
-    
-    # Group by conversation ID
+    is_at_department = department_name in _AT_DEPARTMENTS
+    if is_at_department:
+        _AT_UNRESPONSIVE_SQL_CACHE.pop((department_name, str(target_date)), None)
+
     conversations = df.groupby('CONVERSATION_ID')
     total_conversations = len(conversations)
     
     unresponsive_count = 0
-    bot_routed_no_response_unresponsive_count = 0
     unresponsive_details = []
-    
+
     for conv_id, conv_df in conversations:
-        is_unresponsive, reason = is_conversation_unresponsive_snowflake(conv_df, department_name, departments_config, bot_routed_no_response)
-        
+        is_unresponsive, reason = is_conversation_unresponsive_snowflake(
+            conv_df, department_name, departments_config, session, target_date
+        )
+
         if is_unresponsive:
             unresponsive_count += 1
-            # Track if this is from bot-routed-no-response
-            if conv_id in bot_routed_no_response:
-                bot_routed_no_response_unresponsive_count += 1
             unresponsive_details.append({
                 'CONVERSATION_ID': conv_id,
                 'REASON': reason,
@@ -12072,6 +13294,15 @@ def analyze_unresponsive_conversations_single_department(session, df, department
                 'ANALYSIS_DATE': datetime.now().strftime('%Y-%m-%d')
             })
     
+    if is_at_department and session is not None and target_date is not None:
+        at_unresp_ids = get_at_sql_unresponsive_conv_ids(
+            session, department_name, departments_config, target_date
+        )
+        unresponsive_count = len(at_unresp_ids)
+        total_conversations = len(get_at_cc_supposed_bot_conv_ids(
+            session, department_name, departments_config, target_date
+        )) or total_conversations
+
     # Calculate percentage
     unresponsive_percentage = (unresponsive_count / total_conversations * 100) if total_conversations > 0 else 0
     
@@ -12079,11 +13310,14 @@ def analyze_unresponsive_conversations_single_department(session, df, department
         'total_conversations': total_conversations,
         'unresponsive_count': unresponsive_count,
         'unresponsive_percentage': unresponsive_percentage,
-        'bot_routed_no_response_count': bot_routed_no_response_unresponsive_count
+        'unresponsive_threshold_minutes': None if is_at_department else 50,
     }
-    
+
     print(f"    ✅ {unresponsive_count}/{total_conversations} ({unresponsive_percentage:.1f}%) unresponsive conversations")
-    print(f"    🤖 {bot_routed_no_response_unresponsive_count} bot-routed-no-response conversations")
+    if is_at_department:
+        print(f"    📵 AT rule: last message in CC msg_window = CONSUMER (SQL count={unresponsive_count})")
+    else:
+        print(f"    ⏰ Rule: 50-minute threshold after last consumer message")
     
     # Save raw data to UNRESPONSIVE_RAW_DATA table
     if unresponsive_details:
@@ -12211,7 +13445,7 @@ def analyze_unresponsive_conversations_all_departments(session: snowpark.Session
         try:
             # Get filtered data from Phase 1
             print(f"\n🏢 Processing {department_name}...")
-            filtered_df, phase1_stats, success, bot_routed_no_response = process_department_phase1(session, department_name, target_date)
+            filtered_df, phase1_stats, success, _ = process_department_phase1(session, department_name, target_date)
             
             if not success or filtered_df.empty:
                 print(f"  ❌ {department_name}: No filtered data from Phase 1")
@@ -12219,14 +13453,13 @@ def analyze_unresponsive_conversations_all_departments(session: snowpark.Session
                     'total_conversations': 0,
                     'unresponsive_count': 0,
                     'unresponsive_percentage': 0.0,
-                    'bot_routed_no_response_count': 0,
                     'error': 'No filtered data from Phase 1'
                 }
                 continue
             
             # Analyze unresponsive conversations for this department (includes raw data saving)
             unresponsive_results = analyze_unresponsive_conversations_single_department(
-                session, filtered_df, department_name, departments_config, target_date, bot_routed_no_response
+                session, filtered_df, department_name, departments_config, target_date
             )
             
             department_results[department_name] = unresponsive_results
@@ -12250,7 +13483,7 @@ def analyze_unresponsive_conversations_all_departments(session: snowpark.Session
     print(f"   📋 Total conversations: {total_conversations_all:,}")
     print(f"   📵 Unresponsive conversations: {total_unresponsive_all:,}")
     print(f"   📈 Overall unresponsive rate: {overall_unresponsive_percentage:.1f}%")
-    print(f"   ⏰ Threshold: 50 minutes since last consumer message")
+    print(f"   ⏰ Rule: AT = CC last_msg CONSUMER; others = 50-minute threshold")
     print(f"   💾 Raw data saved to: UNRESPONSIVE_RAW_DATA")
     
     return department_results
@@ -12400,9 +13633,10 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES': bot_data.get('CHATS_WITH_EXACTLY_3_AGENT_MESSAGES', 0),
             'CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('CHATS_WITH_EXACTLY_3_AGENT_MESSAGES_PERCENTAGE', 0), 2),
             'AVG_BOT_MSGS_BEFORE_TRANSFER': bot_data.get('avg_bot_msgs_before_transfer', None),
-            'TRANSFERRED_CONVERSATION_COUNT': bot_data.get('transferred_conversation_count', 0),
+            'TRANSFERRED_CONVERSATION_COUNT': _at_transferred_conversation_count(bot_data, department_name),
             'MCD_MV_TRANSFER_COUNT': bot_data.get('mcd_mv_transfer_count', 0),
             'MCD_CC_TRANSFER_COUNT': bot_data.get('mcd_cc_transfer_count', 0),
+            **_at_master_transfer_table_columns(department_name, bot_data),
             # Call Requests Metrics (Phase 2)
             'Call_Requests_Count': bot_data.get('call_requests_count', 0),
             'Call_Requests_Percentage': round(bot_data.get('call_requests_percentage', 0), 2),
@@ -12438,7 +13672,7 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             'ZERO_BOT_TECHNICAL_ISSUE_PERCENTAGE': round(bot_data.get('zero_bot_technical_issue_percentage', 0), 2),
             'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_COUNT': bot_data.get('zero_bot_bot_delay_autotransfer_count', 0),
             'ZERO_BOT_BOT_DELAY_AUTOTRANSFER_PERCENTAGE': round(bot_data.get('zero_bot_bot_delay_autotransfer_percentage', 0), 2),
-            
+
             # MV_Resolvers Proactive Agent Messages Metrics (Phase 2)
             'PROACTIVE_AGENT_MESSAGES_COUNT': bot_data.get('proactive_agent_messages_count', 0),
             'PROACTIVE_AGENT_MESSAGES_PERCENTAGE': round(bot_data.get('proactive_agent_messages_percentage', 0), 2),
@@ -12562,7 +13796,7 @@ def create_enhanced_combined_metrics_snowflake(bot_results, repetition_results, 
             
             # Analysis Metadata
             'Outlier_Threshold_Seconds': DELAY_OUTLIER_THRESHOLD_SECONDS,
-            'Unresponsive_Threshold_Minutes': 50,
+            'Unresponsive_Threshold_Minutes': unresponsive_data.get('unresponsive_threshold_minutes', 50),
             'Analysis_Date': datetime.now().strftime('%Y-%m-%d'),
             'Phase': 'Phase3_AdvancedAnalytics',
 
@@ -12901,6 +14135,11 @@ def phase3_advanced_analytics_processor(session: snowpark.Session, target_date=N
             session, bot_results, target_date_str
         )
 
+        # Update Not-Fully-Handled per-chat details table (CC_Resolvers only).
+        nfh_details_success = update_not_fully_handled_details_table_snowflake(
+            session, bot_results, target_date_str
+        )
+
         # Generate comprehensive summary
         total_conversations = sum(r.get('total_conversations', 0) for r in bot_results.values())
         total_bot_handled = sum(r.get('bot_handled_count', 0) for r in bot_results.values())
@@ -12973,7 +14212,7 @@ def phase3_advanced_analytics_processor(session: snowpark.Session, target_date=N
    # SIMILARITY DISABLED: ✅ Message 50% similarity analysis (TF-IDF + cosine similarity)
    ✅ 3-method delay calculation (outlier detection)
    ✅ Agent intervention detection (bot failed to respond >4min)
-   ✅ Unresponsive conversation detection (55-min threshold)
+   ✅ Unresponsive conversation detection (AT: CC last_msg CONSUMER; others: 50-min threshold)
    ✅ Downtime detection (>4 min response time from daily_delays_details_final)
    ✅ Shadowing analysis (IS_SHADOWED column detection)
    ✅ Issues analysis (agent-reported issues in shadowed conversations)
@@ -14246,6 +15485,40 @@ ZERO_BOT_MSG_CATEGORIES = (
     'uncategorized',
 )
 
+# ── CC_Resolvers "Not Fully Handled" 6-category breakdown ─────────────────
+# These categories apply to chats where the bot DID send messages (bot_message_count > 0)
+# but still required human agent intervention (chats_with_1_plus_agent_messages).
+NFH_CATEGORIES = (
+    'tech_issue_autotransfer',
+    'bot_delay_autotransfer',
+    'bot_call_customer',
+    'bot_transfer_cc_resolvers',
+    'review_complaint_intervention',
+    'manual_agent_intervention',
+)
+
+# Subcategory values for Category 1 (Bot Call Customer) — callRequestReason arg
+NFH_CALL_CUSTOMER_SUBCATEGORIES = (
+    'standard_case',
+    'cancellation_case',
+    'client_threatening_case',
+    'other',
+)
+
+# Subcategory values for Category 2 (Bot Transfer to CC Resolvers Agents) — Transfer_Reason arg
+NFH_TRANSFER_CC_RESOLVERS_SUBCATEGORIES = (
+    'second_request_to_speak_to_human',
+    'refund_followup',
+    'frustrated_liveout_client_taxi_transfer',
+    'maid_manager_visit_handling',
+    'replacement_nationality_mismatch',
+    'contract_modification',
+    'unofficial_maid_vacation_request',
+    'client_escalations',
+    'payment_or_billing_reasons',
+    'other',
+)
+
 
 def _zero_bot_has_no_maid_linked(conv_df):
     """Rule 1: any private system message contains the No-Maid signature."""
@@ -14566,6 +15839,220 @@ def classify_cc_resolvers_zero_bot_msg_chat(conv_df):
         return 'bot_delay_autotransfer'
 
     return 'uncategorized'
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CC_Resolvers "Not Fully Handled" classifier helpers
+# Classify chats where bot_message_count > 0 but agents still intervened.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _nfh_has_call_customer_tool(conv_df):
+    """True if any message in the conversation references the Call_Customer tool."""
+    if conv_df is None or len(conv_df) == 0:
+        return False
+    pat = re.compile(r'call_customer', re.IGNORECASE)
+    for _, m in conv_df.iterrows():
+        if pat.search(str(m.get('TEXT', ''))):
+            return True
+    return False
+
+
+def _nfh_call_customer_reason(conv_df):
+    """Extract the callRequestReason argument from a Call_Customer tool call.
+
+    Returns one of the NFH_CALL_CUSTOMER_SUBCATEGORIES values, falling back
+    to 'other' if the argument is absent or does not match a known value.
+    """
+    known = {
+        'standard_case': 'standard_case',
+        'cancellation_case': 'cancellation_case',
+        'client_threatening_case': 'client_threatening_case',
+    }
+    reason_re = re.compile(
+        r'\\?"callrequesttransferreason\\?"\s*:\s*\\?"([^"\\]+)\\?"'
+        r'|\\?"callRequestReason\\?"\s*:\s*\\?"([^"\\]+)\\?"',
+        re.IGNORECASE,
+    )
+    last_reason = ''
+    for _, m in conv_df.iterrows():
+        text = str(m.get('TEXT', ''))
+        if 'call_customer' not in text.lower():
+            continue
+        for match in reason_re.finditer(text):
+            raw = (match.group(1) or match.group(2) or '').strip().lower()
+            if raw:
+                last_reason = raw
+    if last_reason:
+        return known.get(last_reason, 'other')
+    return 'other'
+
+
+def _nfh_transfer_reason_cc_resolvers(conv_df):
+    """Extract the Transfer_Reason argument from a Transfer_Chat call that
+    targets CC_RESOLVERS_AGENTS and map it to a known subcategory.
+
+    The Transfer_Reason values in production are long free-text policy
+    descriptions (e.g. "Talk_to_Human_Request — second request for a human
+    agent…"), not short enum strings.  We therefore use keyword / regex
+    pattern matching instead of an exact dict lookup.
+
+    Priority order (first match wins):
+      1. second_request_to_speak_to_human  — "talk_to_human" / "second request" / "speak to human"
+      2. refund_followup                   — "refund" / "follow-up"
+      3. frustrated_liveout_client_taxi_transfer — "liveout" / "live-out" / "taxi" / "frustrated"
+      4. maid_manager_visit_handling       — "maid manager" / "manager visit"
+      5. replacement_nationality_mismatch  — "nationality change" / "branch b" / "replacement" + nationality
+      6. contract_modification             — "contract modif"
+      7. unofficial_maid_vacation_request  — "vacation" / "unofficial"
+      8. client_escalations                — "escalat"
+      9. payment_or_billing_reasons        — "payment" / "billing" / "invoice"
+     10. other                             — catch-all
+
+    Returns one of the NFH_TRANSFER_CC_RESOLVERS_SUBCATEGORIES values.
+    """
+    _TRANSFER_REASON_PATTERNS = [
+        # "Talk to Human Request", "Talk_to_Human_Request", "second request ... human"
+        (re.compile(r'talk.to.human|second.{0,10}request.{0,30}human|speak.{0,10}human|second.request.after', re.IGNORECASE),
+         'second_request_to_speak_to_human'),
+        (re.compile(r'refund|follow.?up', re.IGNORECASE),
+         'refund_followup'),
+        # "taxi", "liveout", "live-out", "frustrated", "maid transportation"
+        (re.compile(r'liveout|live[\s_-]out|taxi|frustrated|maid.transport', re.IGNORECASE),
+         'frustrated_liveout_client_taxi_transfer'),
+        (re.compile(r'maid[\s_-]manager|manager[\s_-]visit', re.IGNORECASE),
+         'maid_manager_visit_handling'),
+        # "Different-price nationalities", "nationality change", "Branch B", "replacement nationality"
+        (re.compile(r'nationality[\s_-]change|nationality[\s_-]mismatch|branch[\s_-]b|replacement.*nationalit|nationalit.*replacement|different.{0,20}nationalit', re.IGNORECASE),
+         'replacement_nationality_mismatch'),
+        # "contract modification", "weekly-rate exception", "weekly rate"
+        (re.compile(r'contract[\s_-]modif|weekly.rate|weekly.rate.exception', re.IGNORECASE),
+         'contract_modification'),
+        (re.compile(r'vacation|unofficial.*maid|maid.*vacation', re.IGNORECASE),
+         'unofficial_maid_vacation_request'),
+        # "escalat", "failed multiple times", "replacement.*failed", "end-to-end review"
+        (re.compile(r'escalat|failed.{0,20}times|replacement.*fail|fail.*replacement|end.to.end.review', re.IGNORECASE),
+         'client_escalations'),
+        (re.compile(r'payment|billing|invoice', re.IGNORECASE),
+         'payment_or_billing_reasons'),
+    ]
+
+    # Allow escaped characters (e.g. \"value\") inside the JSON Transfer_Reason value.
+    reason_re = re.compile(
+        r'\\?"[Tt]ransfer_[Rr]eason\\?"\s*:\s*"((?:[^"\\]|\\.)*)"',
+        re.IGNORECASE,
+    )
+    last_reason = ''
+    for _, m in conv_df.iterrows():
+        text = str(m.get('TEXT', ''))
+        if 'transfer_chat' not in text.lower():
+            continue
+        for match in reason_re.finditer(text):
+            raw = match.group(1).strip()
+            if raw:
+                last_reason = raw
+
+    if last_reason:
+        for pattern, subcategory in _TRANSFER_REASON_PATTERNS:
+            if pattern.search(last_reason):
+                return subcategory
+        return 'other'
+    return 'other'
+
+
+def _nfh_has_review_complaint_with_agent_after(conv_df):
+    """True if a Review_Complaint system message (Action':'Open) is present
+    AND at least one agent Normal Message appears at a later position in the
+    conversation DataFrame.
+    """
+    complaint_phrase = re.compile(r'review_complaint', re.IGNORECASE)
+    action_open_phrase = re.compile(r'Action":"Open', re.IGNORECASE)
+
+    complaint_idx = None
+    for idx, row in conv_df.iterrows():
+        sent_by = str(row.get('SENT_BY', '')).upper()
+        msg_type = str(row.get('MESSAGE_TYPE', '')).upper()
+        text = str(row.get('TEXT', ''))
+        if sent_by == 'SYSTEM' and complaint_phrase.search(text) and action_open_phrase.search(text):
+            complaint_idx = idx
+            break
+
+    if complaint_idx is None:
+        return False
+
+    # Check if any agent Normal Message appears after the complaint row.
+    for idx, row in conv_df.iterrows():
+        if idx <= complaint_idx:
+            continue
+        if (str(row.get('SENT_BY', '')).upper() == 'AGENT'
+                and str(row.get('MESSAGE_TYPE', '')).upper() == 'NORMAL MESSAGE'):
+            return True
+    return False
+
+
+def _nfh_has_error_task(conv_df):
+    """True if any system message contains an 'Error Task' marker.
+
+    Also falls back to the more detailed _zero_bot_has_technical_issue
+    check (Tool API Failure / result=failure+apiCategory=Tool).
+    """
+    if conv_df is None or len(conv_df) == 0:
+        return False
+    error_task_re = re.compile(r'error\s+task', re.IGNORECASE)
+    sys_msgs = conv_df[conv_df['SENT_BY'].astype(str).str.upper() == 'SYSTEM']
+    for _, m in sys_msgs.iterrows():
+        if error_task_re.search(str(m.get('TEXT', ''))):
+            return True
+    return _zero_bot_has_technical_issue(conv_df)
+
+
+def classify_cc_resolvers_not_fully_handled_chat(conv_df):
+    """Classify a CC_Resolvers conversation that has ≥1 bot message but was
+    still NOT fully handled by the bot into exactly one of the six NFH
+    categories defined in NFH_CATEGORIES.
+
+    Priority order (most specific first):
+      1. tech_issue_autotransfer    — Error Task / Tool API Failure marker
+      2. bot_delay_autotransfer     — GPT_CC_RESOLVERS → CC_RESOLVERS_AGENTS By admin
+      3. bot_call_customer          — Call_Customer tool was invoked
+      4. bot_transfer_cc_resolvers  — Transfer_Chat to CC_RESOLVERS_AGENTS
+      5. review_complaint_intervention — Review_Complaint (Action=Open) + agent after
+      6. manual_agent_intervention  — catch-all
+
+    Returns:
+        tuple: (category: str, subcategory: str)
+            subcategory is non-empty only for categories 3 and 4.
+    """
+    if conv_df is None or len(conv_df) == 0:
+        return 'manual_agent_intervention', ''
+
+    # Priority 1 — Technical Issue autotransfer.
+    if _nfh_has_error_task(conv_df):
+        return 'tech_issue_autotransfer', ''
+
+    # Priority 2 — Bot Delay: admin-initiated autotransfer due to timeout.
+    named_kind = _zero_bot_named_agent_transfer(conv_df)
+    if named_kind == 'admin':
+        return 'bot_delay_autotransfer', ''
+
+    # Priority 3 — Call_Customer tool invoked.
+    if _nfh_has_call_customer_tool(conv_df):
+        sub = _nfh_call_customer_reason(conv_df)
+        return 'bot_call_customer', sub
+
+    # Priority 4 — Transfer_Chat to CC_RESOLVERS_AGENTS.
+    has_transfer = _zero_bot_has_transfer_chat_tool_call(conv_df)
+    if has_transfer:
+        dest = _zero_bot_transfer_chat_destination(conv_df)
+        if 'cc_resolvers_agents' in dest or 'cc resolvers agents' in dest:
+            sub = _nfh_transfer_reason_cc_resolvers(conv_df)
+            return 'bot_transfer_cc_resolvers', sub
+
+    # Priority 5 — Review_Complaint tool + agent intervention after.
+    if _nfh_has_review_complaint_with_agent_after(conv_df):
+        return 'review_complaint_intervention', ''
+
+    # Priority 6 — Manual agent intervention (catch-all).
+    return 'manual_agent_intervention', ''
 
 
 def parse_transfer(text):
