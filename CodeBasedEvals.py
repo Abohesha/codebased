@@ -802,7 +802,7 @@ def get_snowflake_departments_config():
         },
         'Travel_Assist': {
             'bot_skills': ['GPT_MV_RESOLVERS_TA'],
-            'agent_skills': ['Travel_Assist_Clients', 'MV_RESOLVERS_SENIORS'],
+            'agent_skills': ['Travel_Assist_Clients','Travel_Assist_Maids'],
             'table_name': 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS',
             'skill_filter': 'GPT_MV_RESOLVERS_TA',
             'bot_filter': 'bot'
@@ -3435,119 +3435,6 @@ def calculate_delighters_to_resolvers_breakdown(session, department_name, depart
         return 0, 0, 0, 0, 0
 
 
-def calculate_total_chats_reached_travel_assist(session, department_name, departments_config, target_date):
-    """
-    Count distinct conversations where GPT_MV_RESOLVERS_TA actually sent at least one message
-    (TARGET_SKILL_PER_MESSAGE = 'GPT_MV_RESOLVERS_TA') for the Travel_Assist department.
-
-    Different from Chats_Supposed_to_be_Bot_Handled, which is the Phase 1 routing pool.
-    """
-    try:
-        department_config = departments_config[department_name]
-        table_name = department_config.get('table_name', 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS')
-        filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
-
-        print(f"    🎯 Calculating total chats that reached Travel Assist bot for {department_name}...")
-
-        query = f"""
-        SELECT COUNT(DISTINCT conversation_id) AS total_reached
-        FROM {table_name}
-        WHERE target_skill_per_message = 'GPT_MV_RESOLVERS_TA'
-        AND date(updated_at) = '{filter_date}'
-        """
-
-        result = session.sql(query).collect()
-        total_reached = int(result[0]['TOTAL_REACHED']) if result and result[0]['TOTAL_REACHED'] is not None else 0
-
-        print(f"    ✅ Total chats that reached GPT_MV_RESOLVERS_TA: {total_reached}")
-        return total_reached
-
-    except Exception as e:
-        print(f"    ⚠️  Error calculating total chats reached Travel Assist: {str(e)}")
-        return 0
-
-
-def calculate_travel_assist_to_humans_breakdown(session, department_name, departments_config, target_date):
-    """
-    Calculate Travel Assist bot -> human transfer breakdown.
-
-    Walks each candidate conversation chronologically. A conversation matches when
-    GPT_MV_RESOLVERS_TA appears in TARGET_SKILL_PER_MESSAGE before a Travel_Assist agent skill
-    (Travel_Assist_Clients or MV_RESOLVERS_SENIORS).
-
-    Returns:
-        tuple: (total_count, to_clients_count, to_seniors_count)
-        total_count = to_clients_count + to_seniors_count
-    """
-    try:
-        department_config = departments_config[department_name]
-        bot_skills = department_config.get('bot_skills', ['GPT_MV_RESOLVERS_TA'])
-        table_name = department_config.get('table_name', 'SILVER.CHAT_EVALS.MV_CLIENTS_CHATS')
-
-        bot_skills_upper = [s.upper() for s in bot_skills]
-        through_skill_or = " OR ".join(
-            [f"through_skill ILIKE '%{s}%'" for s in bot_skills]
-        )
-
-        filter_date = (datetime.strptime(target_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
-
-        print(f"    🔄 Calculating Travel Assist → human breakdown for {department_name}...")
-        print(f"       Bot skills: {bot_skills}")
-
-        query = f"""
-        SELECT *
-        FROM {table_name}
-        WHERE ({through_skill_or})
-        AND date(updated_at) = '{filter_date}'
-        """
-
-        result_df = session.sql(query).to_pandas()
-
-        to_clients_count = 0
-        to_seniors_count = 0
-
-        def _is_bot_skill(skill_upper):
-            return any(bs in skill_upper for bs in bot_skills_upper)
-
-        if not result_df.empty:
-            for conv_id, conv_df in result_df.groupby('CONVERSATION_ID'):
-                conv_df_sorted = conv_df.sort_values('MESSAGE_SENT_TIME') if 'MESSAGE_SENT_TIME' in conv_df.columns else conv_df.sort_index()
-
-                found_bot_skill = False
-
-                for _, row in conv_df_sorted.iterrows():
-                    target_skill = str(row.get('TARGET_SKILL_PER_MESSAGE', '')).strip()
-
-                    if not target_skill:
-                        continue
-
-                    target_skill_upper = target_skill.upper()
-
-                    if _is_bot_skill(target_skill_upper):
-                        found_bot_skill = True
-                        continue
-
-                    if found_bot_skill:
-                        if 'TRAVEL_ASSIST_CLIENTS' in target_skill_upper:
-                            to_clients_count += 1
-                            break
-                        if 'MV_RESOLVERS_SENIORS' in target_skill_upper:
-                            to_seniors_count += 1
-                            break
-
-        total_count = to_clients_count + to_seniors_count
-
-        print(f"    ✅ Travel Assist → humans total: {total_count}")
-        print(f"       └─ to Travel_Assist_Clients: {to_clients_count}")
-        print(f"       └─ to MV_RESOLVERS_SENIORS:   {to_seniors_count}")
-
-        return total_count, to_clients_count, to_seniors_count
-
-    except Exception as e:
-        print(f"    ⚠️  Error calculating Travel Assist → human breakdown: {str(e)}")
-        return 0, 0, 0
-
-
 def calculate_total_seniors_callers(session, department_name, departments_config, target_date):
     """
     Calculate total chats that reached seniors or callers for MV_Resolvers department.
@@ -3825,7 +3712,8 @@ def calculate_total_seniors_callers(session, department_name, departments_config
                         our_bot_conv_ids.add(conv_id)
                         categorized = True
                         break
-            
+                    else :
+                        found_gpt_mv_resolvers = False    
             if categorized:
                 continue
             
@@ -4295,6 +4183,8 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
                     if any(agent_skill.upper() in target_skill.upper() for agent_skill in agent_skills):
                         category = 'our_bot'
                         break
+                    else:
+                        found_gpt_mv_resolvers = False  # Non-agent skill interrupts the path — reset
             
             if category == 'our_bot':
                 # Further categorize into sub-categories for "our_bot"
@@ -7132,7 +7022,6 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
     delighters_normal_to_seniors_count = 0
     delighters_normal_to_callers_count = 0
     delighters_unique_union_count = 0
-    ta_unique_union_count = 0
     mv_bot_known_flow_transfer_count = 0
     mv_bot_tech_errors_transfers_count = 0
     mv_bot_guardrails_count = 0
@@ -7209,20 +7098,6 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         # seniors_our_bot_count is the denominator for the destination-skill percentages.
         # For Delighters that's the "normal" (non-tech-error) sub total = seniors + callers.
         seniors_our_bot_count = delighters_to_resolvers_normal_count
-
-    # Travel_Assist specific: calculate chats that went from GPT_MV_RESOLVERS_TA to human skills
-    if department_name == 'Travel_Assist':
-        ta_total, ta_to_clients, ta_to_seniors = calculate_travel_assist_to_humans_breakdown(
-            session, department_name, departments_config, target_date
-        )
-        ta_unique_union_count = calculate_total_chats_reached_travel_assist(
-            session, department_name, departments_config, target_date
-        )
-
-        total_seniors_callers_count = ta_total
-        seniors_our_bot_to_mv_callers_count = ta_to_clients
-        seniors_our_bot_to_mv_resolvers_seniors_count = ta_to_seniors
-        seniors_our_bot_count = ta_total
 
     # if department_name == 'MV_Resolvers':
     #     print(f"    ⚠️  MV_Resolvers proactive agent metrics: DISABLED")
@@ -7895,10 +7770,6 @@ def analyze_bot_handled_conversations_single_department(session, df, department_
         # For Delighters, UNIQUE_UNION_COUNT stores the count of chats where
         # the GPT_MV_DELIGHTERS bot actually sent at least one message.
         unique_union_count = delighters_unique_union_count
-    elif department_name == 'Travel_Assist':
-        # For Travel_Assist, UNIQUE_UNION_COUNT stores the count of chats where
-        # GPT_MV_RESOLVERS_TA actually sent at least one message.
-        unique_union_count = ta_unique_union_count
     
     # Calculate percentage for MV_Resolvers total seniors/callers (out of unique union count)
     total_seniors_callers_percentage = (total_seniors_callers_count / unique_union_count * 100) if unique_union_count > 0 else (total_seniors_callers_count / total_conversations * 100) if total_conversations > 0 else 0
@@ -10641,7 +10512,7 @@ def update_not_fully_handled_details_table_snowflake(session: snowpark.Session, 
         INSERTED_AT      TIMESTAMP_NTZ
 
     The destination table name is read from the ``NFH_DETAILS_TABLE`` global
-    (e.g. set in the notebook), defaulting to ``EVALS_NFH_DETAILS``.
+    (e.g. set in the notebook), defaulting to ``EVALS_NFH_DETAILS_test_only``.
 
     Existing rows for the same (TARGET_DATE, DEPARTMENT) are deleted before
     insert so re-running the pipeline for the same date is idempotent.
@@ -10657,7 +10528,7 @@ def update_not_fully_handled_details_table_snowflake(session: snowpark.Session, 
     Returns:
         bool: True on success (including the no-rows case), False on error.
     """
-    table_name = globals().get('NFH_DETAILS_TABLE', 'EVALS_NFH_DETAILS')
+    table_name = globals().get('NFH_DETAILS_TABLE', 'EVALS_NFH_DETAILS_test_only')
     print(f"\n📂 UPDATING NOT-FULLY-HANDLED DETAILS TABLE ({table_name})...")
 
     try:
