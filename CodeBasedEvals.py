@@ -3825,6 +3825,8 @@ def calculate_total_seniors_callers(session, department_name, departments_config
                         our_bot_conv_ids.add(conv_id)
                         categorized = True
                         break
+                else :
+                        found_gpt_mv_resolvers = False   
             
             if categorized:
                 continue
@@ -4295,6 +4297,8 @@ def store_resolvers_chats_breakdown(session, department_name, departments_config
                     if any(agent_skill.upper() in target_skill.upper() for agent_skill in agent_skills):
                         category = 'our_bot'
                         break
+                else :
+                        found_gpt_mv_resolvers = False   
             
             if category == 'our_bot':
                 # Further categorize into sub-categories for "our_bot"
